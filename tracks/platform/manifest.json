@@ -1,0 +1,22 @@
+{
+  "name": "hard2pow21",
+  "track": "platform (parked)",
+  "description": "Same pinned 2^21 instance as the algorithm track, proved in-browser conditions: bb.js WASM under the wasm32 4 GB ceiling. Rewards platform engineering (threads, memory64, SRS/heap orchestration) - kept separate from the algorithm boards by design.",
+  "circuit": "../../problem/problem.json",
+  "witness": "../../problem/problem.gz",
+  "circuitSize": 1501711,
+  "paddedSize": 2097152,
+  "fixedConfig": {
+    "backend": "Wasm",
+    "threads": 1,
+    "srsSize": 2097152,
+    "flavor": "poseidon2+zk",
+    "precomputeVk": true
+  },
+  "validity": { "mustVerify": true, "ceilingMiB": 4096 },
+  "grading": {
+    "mode": "separate-boards",
+    "timeMetric": "median prove seconds (bb.js WASM)",
+    "memoryMetric": "peak wasm linear-memory MiB"
+  }
+}

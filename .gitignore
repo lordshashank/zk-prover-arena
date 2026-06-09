@@ -1,0 +1,4 @@
+node_modules/
+.crs
+*.log
+.DS_Store

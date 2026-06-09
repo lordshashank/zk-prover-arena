@@ -1,0 +1,34 @@
+{
+  "name": "hard2pow21",
+  "track": "algorithm",
+  "description": "Fixed hard instance: a deterministic 1,501,711-gate circuit (pads to 2^21). Generic arithmetic-heavy workload (Poseidon2 permutation chain), decoupled from any application. The circuit, witness, proof system, and config are PINNED; the only variable is the prover implementation.",
+  "circuit": "problem/problem.json",
+  "witness": "problem/problem.gz",
+  "circuitSize": 1501711,
+  "paddedSize": 2097152,
+  "sha256": {
+    "circuit": "a8f658d0053c0aae849ce1cce7d240553c113b64c3aacfe2c1616648413d3ed0",
+    "witness": "df92c9effb3ad64902d6df4c5cbb7c7fe6213a68baeed4e44f275e94b9682f3e"
+  },
+  "fixedConfig": {
+    "runtime": "native (algorithm track: isolates the prover algorithm from platform effects like WASM codegen/SIMD)",
+    "threads": 1,
+    "scheme": "ultra_honk (poseidon2 oracle, ZK on — bb defaults)",
+    "note": "These are the rules of the task, not tunables. Single-threaded so the metric rewards algorithmic work, not parallelization. The proof system is frozen by the pinned baseline VK (problem/baseline_vk/vk): a candidate prover must produce proofs that the PINNED BASELINE verifier accepts against that VK."
+  },
+  "baseline": {
+    "bb": "barretenberg v3.0.0-nightly.20260102 (bbup install), arm64-darwin",
+    "role": "computes the pinned VK and verifies every candidate's proof (the trust boundary); also the reference row on both boards"
+  },
+  "validity": {
+    "soundness": "baseline `bb verify` must accept the candidate's proof against the pinned VK",
+    "singleThread": "bb log must report num threads: 1",
+    "complete": "prove must exit 0 and emit proof + public_inputs"
+  },
+  "grading": {
+    "mode": "separate-boards",
+    "timeMetric": "median wall-clock seconds of `bb prove` across runs (lower wins)",
+    "memoryMetric": "peak resident set size (MiB) of the prove process (lower wins)",
+    "comparability": "numbers are comparable only when graded on the same machine; the canonical boards are produced by the repo maintainer's grader"
+  }
+}

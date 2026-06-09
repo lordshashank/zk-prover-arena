@@ -1,0 +1,16 @@
+{
+  "name": "zk-prover-arena",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Optimization arena for ZK prover algorithm research: frozen 2^21 UltraHonk task, swap the prover, graded on time and memory.",
+  "scripts": {
+    "grade": "node grade.mjs --stack=baseline",
+    "board": "node board.mjs",
+    "leaderboard": "node board.mjs --md"
+  },
+  "devDependencies": {
+    "@aztec/bb.js": "3.0.0-nightly.20260102",
+    "pako": "^2.1.0"
+  }
+}

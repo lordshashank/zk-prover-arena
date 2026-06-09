@@ -1,0 +1,6 @@
+{
+  "_comment": "Platform-track registry: stacks are bb.js builds (bare specifier or absolute path to a dest/node entry).",
+  "stacks": {
+    "baseline": { "spec": "@aztec/bb.js", "notes": "installed @aztec/bb.js 3.0.0-nightly.20260102" }
+  }
+}

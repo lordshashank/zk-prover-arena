@@ -1,0 +1,10 @@
+{
+  "_comment": "Registry of candidate provers (algorithm track). Each entry maps a stack name to a native `bb` binary — typically rebuilt from modified barretenberg C++ (MSM, FFT/NTT, polynomial memory layout, ...). 'BASELINE' resolves to the pinned reference binary (~/.bb/bb or $BASELINE_BB). The pinned problem + fixed config are identical for every stack; only the prover binary changes.",
+  "stacks": {
+    "baseline": {
+      "bb": "BASELINE",
+      "source": "barretenberg v3.0.0-nightly.20260102 (unmodified)",
+      "notes": "The reference prover. The number every candidate must beat."
+    }
+  }
+}
