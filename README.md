@@ -51,15 +51,24 @@ Separate boards, no forced product: a pure-memory win and a pure-speed win are b
 
 ### Validity gates (fail any → INVALID, unranked)
 
-1. **Soundness** — the **pinned baseline `bb verify`** must accept your proof against the **pinned VK**. Your binary is never trusted to judge itself.
-2. **Single-thread** — bb's log must report `num threads: 1`.
-3. **Complete** — `prove` exits 0 and emits `proof` + `public_inputs`.
+Each gate exists because it closes a concrete exploit:
+
+1. **Fresh witness per run** (anti proof-caching) — the grader samples a random input `x`, runs `nargo execute` to build the witness and learn the expected public output, and your emitted `public_inputs` **must equal that output**. A binary that replays a cached/embedded proof can't know the fresh output; forging a proof for it without proving would mean breaking UltraHonk soundness. (Same idea as deriving test points by Fiat-Shamir: the challenge is fresh every time.)
+2. **Soundness** — the **pinned baseline `bb verify`** must accept your proof against the **pinned VK**. Your binary is never trusted to judge itself.
+3. **Cross-budgets** (anti axis-trading) — you cannot blow one resource to win the other board:
+   - **time board** entries must keep peak RSS ≤ **4096 MiB** (the wasm32 ceiling — also keeps every time entry browser-transferable; only ~16% headroom over baseline, so no memory-for-speed blowups),
+   - **memory board** entries must keep median time ≤ **2× baseline** (no "recompute everything / stream it slowly" wins).
+4. **Disk gate** (anti spill) — block-output operations ≤ 1024 (baseline does **0**). Disk-backed mmap hides from RSS — without this, bb's existing `--slow_low_memory` flag would "win" the memory board with zero research.
+5. **Single-thread** — bb's log must report `num threads: 1`.
+6. **Complete** — `prove` exits 0 and emits `proof` + `public_inputs`.
+
+Time–memory tradeoffs are *real research* (bigger MSM windows, precomputed tables, recompute-vs-store) — the budgets don't forbid them, they bound them: a tradeoff must keep the other axis within its budget to rank. A genuine total-resource reduction ranks on both boards.
 
 > Scope note: this freezes the *proof system*, so the arena measures **implementation-level** algorithmic work (MSM, FFT, memory layout, allocation strategy, field arithmetic). Protocol-level changes (different proof system / proof format) can't be machine-checked for soundness by a fixed verifier and are out of scope for the boards — open an issue if you have one; they're interesting, just not auto-gradeable.
 
 ## Quickstart
 
-Prereqs: Node 20+, the baseline `bb` v3.0.0-nightly.20260102 (install via [bbup](https://github.com/AztecProtocol/aztec-packages/tree/master/barretenberg/bbup); or set `BASELINE_BB=/path/to/bb`). macOS or Linux (`/usr/bin/time` is used for peak RSS).
+Prereqs: Node 20+, the baseline `bb` v3.0.0-nightly.20260102 (install via [bbup](https://github.com/AztecProtocol/aztec-packages/tree/master/barretenberg/bbup); or set `BASELINE_BB=/path/to/bb`), and `nargo` v1.0.0-beta.18 (via [noirup](https://noir-lang.org/docs/getting_started/installation/); or set `NARGO_BIN`) for the fresh-witness gate. macOS or Linux (`/usr/bin/time` is used for peak RSS). Without nargo the grader falls back to the pinned witness and marks the row `pinned-witness` (not eligible for the canonical boards).
 
 ```bash
 # grade the reference prover (also generates the pinned VK on first run)
@@ -109,7 +118,8 @@ The maintainer regrades every submission on the canonical machine (numbers are o
 ## Repo layout
 
 ```
-problem/         the pinned task: circuit, witness, manifest (SHA-256), pinned VK
+problem/         the pinned task: circuit, witness, manifest (SHA-256), pinned VK,
+                 and source/ (the Noir package the grader uses for fresh witnesses)
 grade.mjs        the grader: candidate proves (timed/measured), baseline verifies
 board.mjs        ranked boards; --md refreshes LEADERBOARD.md
 boards/          append-only result logs (time.tsv, memory.tsv)

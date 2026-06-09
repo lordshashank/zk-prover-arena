@@ -1,38 +1,39 @@
 // zk-prover-arena — grade a candidate PROVER (native bb build) on the pinned task.
 //
-// ALGORITHM TRACK. The circuit, witness, proof system, and config are frozen.
-// The ONLY variable is the prover implementation: a barretenberg `bb` binary,
-// typically rebuilt from modified C++ (MSM, FFT/NTT, polynomial memory, ...).
+// ALGORITHM TRACK. The circuit, proof system, and config are frozen. The ONLY
+// variable is the prover implementation: a barretenberg `bb` binary, typically
+// rebuilt from modified C++ (MSM, FFT/NTT, polynomial memory, ...).
 //
 // Metrics (separate boards, both lower-is-better):
 //   time   = median wall-clock seconds of `bb prove`, SINGLE-THREADED
 //   memory = peak resident set size (MiB) of the prove process
 //
-// Why native + single-threaded: it isolates the *algorithm* from the platform.
-// WASM wall-clock mixes prover work with codegen/SIMD/runtime effects, and
-// multithreading measures the scheduler. Peak RSS is set by the prover's actual
-// allocations (polynomial count x field size + SRS + scratch) — the same
-// quantity that decides how large a circuit fits in any environment, including
-// the browser's 4 GB wasm32 ceiling.
-//
-// SOUNDNESS GATE (the trust boundary, like a fixed reference evaluator):
-//   1. The verification key is computed ONCE by the PINNED BASELINE bb from the
-//      pinned circuit (problem/baseline_vk/vk, committed). This freezes the
-//      proof system: a candidate must produce proofs for *that* VK.
-//   2. The candidate's proof is verified by the PINNED BASELINE `bb verify`
-//      against that VK. The candidate binary is never trusted to judge itself.
-//   Protocol-level changes (new proof system / proof format) are out of scope
-//   for machine grading — see README.
+// ANTI-GAMING DESIGN (each gate closes a concrete exploit):
+//   1. FRESH WITNESS PER RUN — a random input x is sampled, `nargo execute`
+//      computes the witness and the expected public output, and the candidate's
+//      emitted public_inputs MUST equal that output. A binary replaying a
+//      cached/embedded proof cannot know the fresh output; forging a proof for
+//      it without proving = breaking UltraHonk soundness.
+//   2. SOUNDNESS — the PINNED BASELINE `bb verify` must accept the proof against
+//      the PINNED VK (problem/baseline_vk/vk). The candidate never judges itself.
+//   3. CROSS-BUDGETS — no trading one resource for rank on the other board:
+//        time board   : valid only if peak RSS <= 4096 MiB (the wasm32 ceiling;
+//                       keeps time entries browser-transferable)
+//        memory board : valid only if median time <= 2x baseline
+//   4. DISK GATE — block-output ops bounded (baseline: 0), closing the
+//      mmap/spill loophole (file-backed pages hide from RSS — bb's own
+//      --slow_low_memory would otherwise "win" the memory board for free).
+//   5. SINGLE-THREAD — confirmed from bb's own log line.
 //
 // Usage:
 //   node grade.mjs --stack=baseline
-//   node grade.mjs --stack=my-fft-fix --bb=/abs/path/to/modified/bb
-//   node grade.mjs --stack=baseline --runs=5
+//   node grade.mjs --stack=my-msm-fix --bb=/abs/path/to/modified/bb
 import { spawnSync } from 'node:child_process';
-import { readFileSync, existsSync, appendFileSync, mkdirSync, rmSync } from 'node:fs';
+import { readFileSync, existsSync, appendFileSync, mkdirSync, rmSync, writeFileSync, cpSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir, tmpdir } from 'node:os';
+import { randomBytes } from 'node:crypto';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const args = Object.fromEntries(process.argv.slice(2).map((s) => {
@@ -42,9 +43,10 @@ const args = Object.fromEntries(process.argv.slice(2).map((s) => {
 const runs = args.runs ? parseInt(args.runs) : 3;
 const stackName = args.stack || 'baseline';
 const manifest = JSON.parse(readFileSync(resolve(__dirname, 'problem', 'manifest.json'), 'utf8'));
+const BUDGET = manifest.validity.budgets;
 const BASELINE_BB = process.env.BASELINE_BB || resolve(homedir(), '.bb', 'bb');
+const NARGO = process.env.NARGO_BIN || resolve(homedir(), '.nargo', 'bin', 'nargo');
 
-// Resolve the candidate bb binary: --bb path, or stacks/registry.json entry.
 let candidateBB = args.bb;
 if (!candidateBB) {
   const reg = JSON.parse(readFileSync(resolve(__dirname, 'stacks', 'registry.json'), 'utf8'));
@@ -56,98 +58,135 @@ if (!existsSync(candidateBB)) throw new Error(`bb binary not found: ${candidateB
 if (!existsSync(BASELINE_BB)) throw new Error(`baseline bb not found at ${BASELINE_BB} (set BASELINE_BB env var)`);
 
 const CIRCUIT = resolve(__dirname, manifest.circuit);
-const WITNESS = resolve(__dirname, manifest.witness);
+const SOURCE_PKG = resolve(__dirname, 'problem', 'source');
+const PINNED_WITNESS = resolve(__dirname, manifest.witness);
 const VK_DIR = resolve(__dirname, 'problem', 'baseline_vk');
 const VK = resolve(VK_DIR, 'vk');
-const ENV1 = { ...process.env, HARDWARE_CONCURRENCY: String(manifest.fixedConfig.threads) };
+const ENV1 = { ...process.env, HARDWARE_CONCURRENCY: '1' };
+const haveNargo = existsSync(NARGO) && existsSync(resolve(SOURCE_PKG, 'Nargo.toml'));
 
-// ---- Ensure the pinned baseline VK exists (computed once by the BASELINE bb) ----
 if (!existsSync(VK)) {
   console.log('  [setup] computing pinned baseline VK (one-time, baseline bb)...');
   mkdirSync(VK_DIR, { recursive: true });
   const r = spawnSync(BASELINE_BB, ['write_vk', '-b', CIRCUIT, '-o', VK_DIR], { env: ENV1, encoding: 'utf8' });
   if (r.status !== 0 || !existsSync(VK)) throw new Error(`baseline write_vk failed: ${(r.stderr || '').slice(-300)}`);
-  console.log('  [setup] baseline VK written to problem/baseline_vk/vk');
 }
 
-// ---- One graded run: candidate proves (timed+measured), baseline verifies ----
+// ---- Fresh witness: random x -> nargo execute -> { witnessPath, expectedHex } ----
+function freshWitness(runDir) {
+  const pkg = resolve(runDir, 'source');
+  cpSync(SOURCE_PKG, pkg, { recursive: true });
+  rmSync(resolve(pkg, 'target'), { recursive: true, force: true });
+  const x = BigInt('0x' + randomBytes(31).toString('hex')).toString(10); // 248-bit < field modulus
+  writeFileSync(resolve(pkg, 'Prover.toml'), `x = "${x}"\n`);
+  const r = spawnSync(NARGO, ['execute', '--silence-warnings'], { cwd: pkg, encoding: 'utf8' });
+  const m = /Circuit output:\s*(0x[0-9a-fA-F]+)/.exec((r.stdout || '') + (r.stderr || ''));
+  const wit = resolve(pkg, 'target', 'synth.gz');
+  if (r.status !== 0 || !m || !existsSync(wit)) throw new Error(`nargo execute failed: ${(r.stderr || '').slice(-300)}`);
+  return { witnessPath: wit, expectedHex: m[1].slice(2).toLowerCase().padStart(64, '0') };
+}
+
+// ---- One graded run: fresh challenge, candidate proves, gates checked ----
 function gradedRun(i) {
-  const outDir = resolve(tmpdir(), `zkarena-${process.pid}-${i}`);
-  rmSync(outDir, { recursive: true, force: true });
-  mkdirSync(outDir, { recursive: true });
+  const runDir = resolve(tmpdir(), `zkarena-${process.pid}-${i}`);
+  rmSync(runDir, { recursive: true, force: true });
+  mkdirSync(runDir, { recursive: true });
+  try {
+    let witnessPath = PINNED_WITNESS, expectedHex = null, fresh = false;
+    if (haveNargo) {
+      ({ witnessPath, expectedHex } = freshWitness(runDir));
+      fresh = true;
+    }
 
-  // /usr/bin/time: -l on macOS (max RSS in bytes), -v on Linux (KB).
-  const isLinux = process.platform === 'linux';
-  const timeFlag = isLinux ? '-v' : '-l';
-  const t0 = process.hrtime.bigint();
-  // Prove against the PINNED VK (-k): no VK computation inside the timed run,
-  // and the candidate is forced to target the frozen proof system.
-  const p = spawnSync('/usr/bin/time', [timeFlag, candidateBB, 'prove', '-b', CIRCUIT, '-w', WITNESS, '-k', VK, '-o', outDir],
-    { env: ENV1, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
-  const proveS = Number(process.hrtime.bigint() - t0) / 1e9;
+    const outDir = resolve(runDir, 'out');
+    mkdirSync(outDir);
+    const isLinux = process.platform === 'linux';
+    const t0 = process.hrtime.bigint();
+    const p = spawnSync('/usr/bin/time',
+      [isLinux ? '-v' : '-l', candidateBB, 'prove', '-b', CIRCUIT, '-w', witnessPath, '-k', VK, '-o', outDir],
+      { env: ENV1, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+    const proveS = Number(process.hrtime.bigint() - t0) / 1e9;
+    if (p.status !== 0) return { ok: false, err: `prove exit ${p.status}: ${(p.stderr || '').slice(-300)}` };
 
-  if (p.status !== 0) {
-    rmSync(outDir, { recursive: true, force: true });
-    return { ok: false, err: `prove exit ${p.status}: ${(p.stderr || '').slice(-300)}` };
+    const errOut = p.stderr || '';
+    let peakMiB = null;
+    const mMac = /(\d+)\s+maximum resident set size/.exec(errOut);
+    const mLin = /Maximum resident set size[^:]*:\s*(\d+)/.exec(errOut);
+    if (mMac) peakMiB = parseInt(mMac[1]) / (1024 * 1024);
+    else if (mLin) peakMiB = parseInt(mLin[1]) / 1024;
+
+    let diskOps = null;
+    const dMac = /(\d+)\s+block output operations/.exec(errOut);
+    const dLin = /File system outputs:\s*(\d+)/.exec(errOut);
+    if (dMac) diskOps = parseInt(dMac[1]); else if (dLin) diskOps = parseInt(dLin[1]);
+
+    const threadLine = /num threads:\s*(\d+)/.exec((p.stdout || '') + errOut);
+    const threadsUsed = threadLine ? parseInt(threadLine[1]) : null;
+
+    // Gate: emitted public output must equal the fresh expected output.
+    const pubPath = resolve(outDir, 'public_inputs');
+    const proofPath = resolve(outDir, 'proof');
+    let outputMatch = !fresh; // without nargo we cannot check (row gets noted)
+    if (fresh && existsSync(pubPath)) {
+      outputMatch = readFileSync(pubPath).toString('hex').toLowerCase() === expectedHex;
+    }
+
+    // Gate: pinned baseline verifier, pinned VK.
+    let verified = false;
+    if (existsSync(proofPath) && existsSync(pubPath)) {
+      const v = spawnSync(BASELINE_BB, ['verify', '-p', proofPath, '-k', VK, '-i', pubPath], { env: ENV1, encoding: 'utf8' });
+      verified = v.status === 0;
+    }
+    return { ok: true, proveS, peakMiB, diskOps, verified, outputMatch, threadsUsed, fresh };
+  } finally {
+    rmSync(runDir, { recursive: true, force: true });
   }
-
-  // Parse peak RSS from /usr/bin/time output (stderr).
-  let peakMiB = null;
-  const mMac = /(\d+)\s+maximum resident set size/.exec(p.stderr || '');
-  const mLin = /Maximum resident set size[^:]*:\s*(\d+)/.exec(p.stderr || '');
-  if (mMac) peakMiB = parseInt(mMac[1]) / (1024 * 1024);
-  else if (mLin) peakMiB = parseInt(mLin[1]) / 1024;
-
-  // Confirm single-thread pinning from bb's own log.
-  const threadLine = /num threads:\s*(\d+)/.exec((p.stdout || '') + (p.stderr || ''));
-  const threadsUsed = threadLine ? parseInt(threadLine[1]) : null;
-
-  // SOUNDNESS GATE: baseline bb verifies the candidate's proof against the PINNED VK.
-  const proofPath = resolve(outDir, 'proof');
-  const pubPath = resolve(outDir, 'public_inputs');
-  let verified = false;
-  if (existsSync(proofPath) && existsSync(pubPath)) {
-    const v = spawnSync(BASELINE_BB, ['verify', '-p', proofPath, '-k', VK, '-i', pubPath], { env: ENV1, encoding: 'utf8' });
-    verified = v.status === 0;
-  }
-  rmSync(outDir, { recursive: true, force: true });
-  return { ok: true, proveS, peakMiB, verified, threadsUsed };
 }
 
 const median = (xs) => { const s = [...xs].sort((a, b) => a - b); const m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
 
 console.log(`\n=== zk-prover-arena :: grading "${stackName}" on task "${manifest.name}" (2^${Math.log2(manifest.paddedSize)}) ===`);
 console.log(`candidate bb: ${candidateBB}`);
-console.log(`fixed: native, threads=${manifest.fixedConfig.threads}, scheme=${manifest.fixedConfig.scheme}; soundness gate: baseline verify vs pinned VK; runs=${runs}\n`);
+console.log(`fresh witness per run: ${haveNargo ? 'yes (nargo)' : 'NO — pinned-witness fallback, output gate skipped'}`);
+console.log(`budgets: time board needs peakRSS<=${BUDGET.timeBoardMemBudgetMiB}MiB; memory board needs time<=${BUDGET.memoryBoardTimeBudgetS}s; diskOps<=${BUDGET.maxBlockOutputOps}; runs=${runs}\n`);
 
-const times = []; const peaks = [];
-let allVerified = true, ok = true, lastErr = null, threadViolation = false;
+const times = []; const peaks = []; const disks = [];
+let allVerified = true, allOutputs = true, ok = true, lastErr = null, threadViolation = false, anyFresh = false;
 for (let r = 0; r < runs; r++) {
   const res = gradedRun(r);
   if (!res.ok) { ok = false; lastErr = res.err; break; }
-  if (res.threadsUsed != null && res.threadsUsed !== manifest.fixedConfig.threads) threadViolation = true;
+  if (res.threadsUsed != null && res.threadsUsed !== 1) threadViolation = true;
   times.push(res.proveS); peaks.push(res.peakMiB);
+  if (res.diskOps != null) disks.push(res.diskOps);
   if (!res.verified) allVerified = false;
-  console.log(`  run ${r + 1}/${runs}: prove ${res.proveS.toFixed(2)}s  peakRSS ${res.peakMiB?.toFixed(0)}MiB  threads=${res.threadsUsed}  verified=${res.verified}`);
+  if (!res.outputMatch) allOutputs = false;
+  if (res.fresh) anyFresh = true;
+  console.log(`  run ${r + 1}/${runs}: prove ${res.proveS.toFixed(2)}s  peakRSS ${res.peakMiB?.toFixed(0)}MiB  diskOps ${res.diskOps}  threads=${res.threadsUsed}  verified=${res.verified}  outputMatch=${res.outputMatch}`);
 }
 
 const medS = times.length ? +median(times).toFixed(2) : null;
 const peakMiB = peaks.length ? Math.max(...peaks.filter((x) => x != null)) : null;
-const valid = ok && allVerified && !threadViolation && medS != null && peakMiB != null;
+const maxDisk = disks.length ? Math.max(...disks) : null;
+const diskOk = maxDisk == null || maxDisk <= BUDGET.maxBlockOutputOps;
 
-console.log(`\n  median prove: ${medS ?? 'n/a'} s    peak RSS: ${peakMiB?.toFixed(0) ?? 'n/a'} MiB`);
-console.log(`  gates: soundness(baseline verify)=${allVerified ? 'PASS' : 'FAIL'}  single-thread=${threadViolation ? 'FAIL' : 'PASS'}  complete=${ok ? 'PASS' : 'FAIL'}`);
-console.log(`  => ${valid ? 'VALID' : 'INVALID'}${ok ? '' : '  (' + String(lastErr).slice(0, 100) + ')'}\n`);
+const coreValid = ok && allVerified && allOutputs && !threadViolation && diskOk && medS != null && peakMiB != null;
+const timeBoardValid = coreValid && peakMiB <= BUDGET.timeBoardMemBudgetMiB;
+const memBoardValid = coreValid && medS <= BUDGET.memoryBoardTimeBudgetS;
+
+console.log(`\n  median prove: ${medS ?? 'n/a'} s    peak RSS: ${peakMiB?.toFixed(0) ?? 'n/a'} MiB    max diskOps: ${maxDisk ?? 'n/a'}`);
+console.log(`  gates: soundness=${allVerified ? 'PASS' : 'FAIL'}  freshOutput=${allOutputs ? (anyFresh ? 'PASS' : 'SKIPPED') : 'FAIL'}  single-thread=${threadViolation ? 'FAIL' : 'PASS'}  disk=${diskOk ? 'PASS' : 'FAIL'}  complete=${ok ? 'PASS' : 'FAIL'}`);
+console.log(`  time board: ${timeBoardValid ? 'VALID' : 'INVALID'} (mem budget ${peakMiB != null ? peakMiB.toFixed(0) : '?'}<=${BUDGET.timeBoardMemBudgetMiB})   memory board: ${memBoardValid ? 'VALID' : 'INVALID'} (time budget ${medS ?? '?'}<=${BUDGET.memoryBoardTimeBudgetS})${ok ? '' : '  (' + String(lastErr).slice(0, 100) + ')'}\n`);
 
 const iso = args.now || new Date().toISOString();
+const note = [ok ? '' : 'ERR', anyFresh ? '' : 'pinned-witness', diskOk ? '' : 'disk-spill'].filter(Boolean).join(',');
 function append(file, header, row) {
   const p = resolve(__dirname, 'boards', file);
   mkdirSync(dirname(p), { recursive: true });
   if (!existsSync(p)) appendFileSync(p, header.join('\t') + '\n');
   appendFileSync(p, row.join('\t') + '\n');
 }
-append('time.tsv', ['iso', 'stack', 'task', 'median_prove_s', 'verified', 'valid', 'note'],
-  [iso, stackName, manifest.name, medS ?? '', allVerified ? 1 : 0, valid ? 1 : 0, ok ? '' : 'ERR']);
-append('memory.tsv', ['iso', 'stack', 'task', 'peak_rss_MiB', 'verified', 'valid', 'note'],
-  [iso, stackName, manifest.name, peakMiB != null ? peakMiB.toFixed(0) : '', allVerified ? 1 : 0, valid ? 1 : 0, ok ? '' : 'ERR']);
-console.log(`  appended to boards/time.tsv + boards/memory.tsv — run \`node board.mjs\` to rank, \`node board.mjs --md\` to refresh LEADERBOARD.md\n`);
+append('time.tsv', ['iso', 'stack', 'task', 'median_prove_s', 'peak_rss_MiB', 'verified', 'valid', 'note'],
+  [iso, stackName, manifest.name, medS ?? '', peakMiB != null ? peakMiB.toFixed(0) : '', allVerified ? 1 : 0, timeBoardValid ? 1 : 0, note]);
+append('memory.tsv', ['iso', 'stack', 'task', 'peak_rss_MiB', 'median_prove_s', 'verified', 'valid', 'note'],
+  [iso, stackName, manifest.name, peakMiB != null ? peakMiB.toFixed(0) : '', medS ?? '', allVerified ? 1 : 0, memBoardValid ? 1 : 0, note]);
+console.log(`  appended to boards/ — \`node board.mjs --md\` refreshes LEADERBOARD.md\n`);

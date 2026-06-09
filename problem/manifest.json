@@ -22,8 +22,15 @@
   },
   "validity": {
     "soundness": "baseline `bb verify` must accept the candidate's proof against the pinned VK",
+    "freshWitness": "a random input x is sampled per run (nargo execute on problem/source); the candidate's emitted public output must equal the expected output — kills cached/replayed proofs",
     "singleThread": "bb log must report num threads: 1",
-    "complete": "prove must exit 0 and emit proof + public_inputs"
+    "complete": "prove must exit 0 and emit proof + public_inputs",
+    "budgets": {
+      "timeBoardMemBudgetMiB": 4096,
+      "memoryBoardTimeBudgetS": 63.6,
+      "maxBlockOutputOps": 1024,
+      "rationale": "Cross-budgets prevent trading one resource for rank on the other board: time entries must stay under the wasm32 4 GB ceiling (browser-transferable; blocks memory-for-speed blowups), memory entries must stay under 2x baseline time (blocks recompute-everything wins). The disk-ops cap closes the mmap/spill loophole (file-backed pages hide from RSS; baseline does 0 block-output ops)."
+    }
   },
   "grading": {
     "mode": "separate-boards",
