@@ -64,6 +64,11 @@ Each gate exists because it closes a concrete exploit:
 
 Time–memory tradeoffs are *real research* (bigger MSM windows, precomputed tables, recompute-vs-store) — the budgets don't forbid them, they bound them: a tradeoff must keep the other axis within its budget to rank. A genuine total-resource reduction ranks on both boards.
 
+### Trust model & residual notes
+
+- **Where the trust sits:** the canonical boards are produced by the maintainer's grader (like a fixed reference evaluator). The fresh challenge `x` comes from the grader's CSPRNG at grade time — fine under that trust model, since prove time barely depends on `x`. If fully trustless challenges are ever wanted, the mechanical upgrade is to derive `x = H(submission binary ‖ date)` Fiat-Shamir-style, so anyone can re-derive the exact challenge from the submission itself.
+- **Legitimate preprocessing:** baking **witness-independent** data (circuit structure, proving-key layout) into your binary is fair game — that's standard SNARK preprocessing, it's bounded (~5% of baseline prove time), and it cannot touch the witness-dependent bulk the arena measures (wire polynomials, z_perm, sumcheck, the MSMs). Caching anything **witness-dependent** is exactly what the fresh-witness gate kills.
+
 > Scope note: this freezes the *proof system*, so the arena measures **implementation-level** algorithmic work (MSM, FFT, memory layout, allocation strategy, field arithmetic). Protocol-level changes (different proof system / proof format) can't be machine-checked for soundness by a fixed verifier and are out of scope for the boards — open an issue if you have one; they're interesting, just not auto-gradeable.
 
 ## Quickstart
