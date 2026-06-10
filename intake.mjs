@@ -88,7 +88,11 @@ export function checkPatchPaths(patchText) {
 }
 
 // ---- 3. claimed-score pre-filter ----
-export function readBests(boardsDir = resolve(__dirname, 'boards')) {
+// stackFilter limits the scan to one stack (e.g. 'baseline' — used by the pre-filter,
+// because claims are LOCAL-hardware numbers: comparing them to the CI boards' bests
+// would unfairly bounce honest submissions from slower machines. Any genuine
+// optimization at least claims to beat the baseline on its own hardware.)
+export function readBests(boardsDir = resolve(__dirname, 'boards'), stackFilter = null) {
   const bestOf = (file, key) => {
     const p = resolve(boardsDir, file);
     if (!existsSync(p)) return null;
@@ -98,6 +102,7 @@ export function readBests(boardsDir = resolve(__dirname, 'boards')) {
     for (const l of lines.slice(1)) {
       const r = Object.fromEntries(l.split('\t').map((v, i) => [head[i], v]));
       if (r.valid !== '1') continue;
+      if (stackFilter && r.stack !== stackFilter) continue;
       const v = parseFloat(r[key]);
       if (Number.isFinite(v) && (best == null || v < best.value)) best = { value: v, stack: r.stack, iso: r.iso };
     }
@@ -106,13 +111,13 @@ export function readBests(boardsDir = resolve(__dirname, 'boards')) {
   return { time: bestOf('time.tsv', 'median_prove_s'), memory: bestOf('memory.tsv', 'peak_rss_MiB') };
 }
 
-export function checkClaims(sub, bests) {
-  const bestT = bests.time?.value ?? Infinity;
-  const bestM = bests.memory?.value ?? Infinity;
-  const claimsTime = sub.claimedTimeS <= bestT;
-  const claimsMem = sub.claimedPeakMiB <= bestM;
+export function checkClaims(sub, refs) {
+  const refT = refs.time?.value ?? Infinity;
+  const refM = refs.memory?.value ?? Infinity;
+  const claimsTime = sub.claimedTimeS <= refT;
+  const claimsMem = sub.claimedPeakMiB <= refM;
   if (!claimsTime && !claimsMem) {
-    throw new Reject(`claimed-score pre-filter: claimedTimeS=${sub.claimedTimeS} >= best ${bestT}s (${bests.time?.stack}) AND claimedPeakMiB=${sub.claimedPeakMiB} >= best ${bestM}MiB (${bests.memory?.stack}) — must claim to improve at least one board`);
+    throw new Reject(`claimed-score pre-filter: claimedTimeS=${sub.claimedTimeS} >= baseline ${refT}s AND claimedPeakMiB=${sub.claimedPeakMiB} >= baseline ${refM}MiB — must claim to improve on the baseline on at least one axis (claims are your LOCAL numbers; measure both with grade.mjs --runs=5)`);
   }
   return { claimsTime, claimsMem };
 }
@@ -161,8 +166,8 @@ export function intake(dir, { withApplyCheck = true } = {}) {
   const { touched } = checkPatchPaths(patchText);
   log(`patch touches ${touched.length} file(s), all under ${ALLOWED_PREFIX}**`);
   const bests = readBests();
-  const claims = checkClaims(sub, bests);
-  log(`claims ${sub.claimedTimeS}s / ${sub.claimedPeakMiB}MiB vs bests ${bests.time?.value ?? '—'}s / ${bests.memory?.value ?? '—'}MiB — pre-filter PASS`);
+  const claims = checkClaims(sub, readBests(undefined, 'baseline'));
+  log(`claims ${sub.claimedTimeS}s / ${sub.claimedPeakMiB}MiB (local) — pre-filter vs baseline PASS; current bests ${bests.time?.value ?? '—'}s / ${bests.memory?.value ?? '—'}MiB`);
   if (withApplyCheck) {
     let wt = null;
     try {

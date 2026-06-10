@@ -73,9 +73,9 @@ Time–memory tradeoffs are *real research* (bigger MSM windows, precomputed tab
 
 ## Quickstart
 
-Prereqs: Node 20+, the baseline `bb` built from aztec-packages branch `next` @ `7e94c2c0e3` (build `barretenberg/cpp` target `bb` and place at `~/.bb-next/bb`, or set `BASELINE_BB=/path/to/bb`), and `nargo` v1.0.0-beta.22 (via [noirup](https://noir-lang.org/docs/getting_started/installation/); or set `NARGO_BIN`) for the fresh-witness gate. macOS or Linux (`/usr/bin/time` is used for peak RSS). Without nargo the grader falls back to the pinned witness and marks the row `pinned-witness` (not eligible for the canonical boards).
+Prereqs: Node 20+, the baseline `bb` built from aztec-packages branch `next` @ `7e94c2c0e3` (build `barretenberg/cpp` target `bb` exactly as in step 1–2 of the research loop below, from the *unpatched* base, and place it at `~/.bb-next/bb` — or set `BASELINE_BB=/path/to/bb`), and `nargo` v1.0.0-beta.22 (via [noirup](https://noir-lang.org/docs/getting_started/installation/); or set `NARGO_BIN`) for the fresh-witness gate. macOS or Linux (`/usr/bin/time` is used for peak RSS). Without nargo the grader falls back to the pinned witness and marks the row `pinned-witness` (not eligible for the canonical boards).
 
-Local grading is the research loop; it is **advisory**. Official scores are produced only by the `official-grade` CI workflow on the canonical `ubuntu-24.04-arm` runner — `ci/setup.sh` is the exact recipe for that environment if you want to reproduce it.
+Local grading is the research loop; it is **advisory**. Official scores are produced only by the `official-grade` CI workflow on the two canonical environments (arm64 + x86 — see the FAQ) — `ci/setup.sh` is the exact recipe for those environments if you want to reproduce one.
 
 ```bash
 # grade the reference prover (also generates the pinned VK on first run)
@@ -91,15 +91,19 @@ node board.mjs --md
 
 ## How to optimize (the research loop)
 
-1. **Get the barretenberg source** (the baseline is aztec-packages branch `next` @ `7e94c2c0e3` — the task tracks upstream so optimizations can be merged directly; task v1, pinned to `v3.0.0-nightly.20260102`, is archived in `boards/archive-v1/`):
+1. **Get the barretenberg source at the pinned base** (aztec-packages `next` @ `7e94c2c0e3` — the task tracks upstream so optimizations can be merged directly; your patch must eventually diff against *exactly* this commit; task v1, pinned to `v3.0.0-nightly.20260102`, is archived in `boards/archive-v1/`). No fork of aztec-packages is needed — you only ever submit a patch file:
    ```bash
    git clone https://github.com/AztecProtocol/aztec-packages
-   cd aztec-packages/barretenberg/cpp
+   cd aztec-packages
+   git checkout -b my-opt 7e94c2c0e32820e25e20d39a426d546dae56a34f
+   cd barretenberg/cpp
    ```
-2. **Build the native prover** (needs clang 16+, cmake, ninja — no WASM toolchain required):
+2. **Build the native prover** (clang 20 recommended — it's what the canonical runners use — plus cmake, ninja, and corepack; no WASM toolchain required):
    ```bash
-   cmake --preset clang16 && cmake --build --preset clang16 --target bb
+   corepack enable    # bb's cmake configure probes a small yarn package (nodejs_module) — without this, configure fails with a node-api-headers error
+   cmake --preset default && cmake --build --preset default --target bb
    # binary at build/bin/bb
+   # macOS with homebrew LLVM instead: BREW_PREFIX=/opt/homebrew cmake --preset homebrew && cmake --build --preset homebrew --target bb
    ```
 3. **Change the prover.** Where the cost lives (file paths relative to `barretenberg/cpp/src/barretenberg/`):
    - `ecc/scalar_multiplication/` — Pippenger MSM (bucket method, window sizes, endomorphism splitting, batch affine addition)
@@ -108,23 +112,32 @@ node board.mjs --md
    - `commitment_schemes/` — Gemini fold / Shplonk batching (scratch polynomials)
    - `sumcheck/` — round univariates, partial evaluation memory reuse
    - `flavor/ultra_flavor.hpp` — the ~40-polynomial set itself (careful: changing *what* is committed changes the VK → fails the soundness gate; changing *how* it's computed/stored is fair game)
-4. **Grade it:** `node grade.mjs --stack=<name> --bb=<path>` — the gate guarantees your speedup didn't break correctness.
+4. **Grade it:** `node grade.mjs --stack=<name> --bb=<path> --runs=5` (in this repo) — the gates guarantee your speedup didn't break correctness, and the 5-run median/σ are what you'll put in your submission's claims.
 5. **Iterate.** The frozen task means any delta on either board is attributable entirely to your change.
 
 Ideas with real headroom (none of these are done in the baseline): batch-affine MSM tuning for this exact size, in-place/streamed Gemini folds, freeing precomputed polynomials after commitment, arena-allocating the proving key, NTT cache-blocking, lazy reduction in field ops.
 
 ## Submitting to the leaderboard
 
-Promotion is **bot-operated with a monotone audit trail** (the ecdsa.fail/Yukon model, adapted for a noisy wall-clock metric), and **official grading runs in CI on one fixed hardware class** — GitHub-hosted `ubuntu-24.04-arm` runners — never on anyone's laptop. Format details: [`submissions/SPEC.md`](./submissions/SPEC.md). Agent-operable walkthrough of the whole loop: [`SKILL.md`](./SKILL.md).
+Promotion is **bot-operated with a monotone audit trail** (the ecdsa.fail/Yukon model, adapted for a noisy wall-clock metric), and **official grading runs in CI on two canonical environments** — arm64 (`ubuntu-24.04-arm`) and x86 (`ubuntu-latest`) — never on anyone's laptop. Format details: [`submissions/SPEC.md`](./submissions/SPEC.md). Agent-operable walkthrough of the whole loop: [`SKILL.md`](./SKILL.md).
 
-1. **You open a PR** adding `submissions/incoming/<name>/` containing:
+0. **Before the PR, package and self-validate locally** (full walkthrough: [`SKILL.md`](./SKILL.md)):
+   ```bash
+   mkdir -p submissions/incoming/my-opt
+   git -C /path/to/aztec-packages diff 7e94c2c0e32820e25e20d39a426d546dae56a34f my-opt \
+     -- barretenberg/cpp/src > submissions/incoming/my-opt/changes.patch
+   # write submissions/incoming/my-opt/submission.json (claims = your local grade.mjs --runs=5 numbers)
+   BB_REPO=/path/to/aztec-packages node intake.mjs submissions/incoming/my-opt
+   ```
+   Intake passing locally means your PR won't bounce on schema/path-policy/apply errors.
+1. **Fork *this* repo and open a PR** adding `submissions/incoming/<name>/` containing:
    - `submission.json` — `{name, author, model, notes, claimedTimeS, claimedPeakMiB, patch}`. **`model` is required**: the AI model that produced the optimization, or `"human"` — attribution is part of the public record.
    - `changes.patch` — a git diff against the pinned base (aztec-packages `next` @ `7e94c2c0e3`), touching only `barretenberg/cpp/src/barretenberg/**` (no cmake presets/toolchains/flags, no binaries — source-only).
-2. **Intake runs automatically on your PR** ([`submission-intake` workflow](./.github/workflows/submission-intake.yml); also runnable locally as `node intake.mjs <dir>`): schema, path policy, clean `git apply --check` against the pinned base, and the **claimed-score pre-filter** — claims strictly worse than the current best on *both* boards are rejected before any compute is spent. Claims are advisory; lying doesn't help, officials are re-measured. Intake never builds or executes your patch.
+2. **Intake runs automatically on your PR** ([`submission-intake` workflow](./.github/workflows/submission-intake.yml); also runnable locally as `node intake.mjs <dir>`): schema, path policy, clean `git apply --check` against the pinned base, and the **claimed-score pre-filter** — claims worse than the *baseline* on both axes are rejected before any compute is spent (claims are your local numbers, so they're compared against the baseline, not the CI bests). Claims are advisory; lying doesn't help, officials are re-measured. Intake never builds or executes your patch.
 3. **A maintainer reviews the patch and dispatches the [`official-grade` workflow](./.github/workflows/official-grade.yml)** for your PR. It grades on **both canonical environments in parallel** — arm64 (`ubuntu-24.04-arm`, Cobalt 100, absolute seconds) and x86 (`ubuntu-latest`, Aztec's perf ISA, scored as a ratio to a baseline graded on the same VM) — each via `promote.mjs --grade-only`: build from source (standard preset, pinned toolchain), `grade.mjs --runs=5` under all validity gates. Then `ci/decide.mjs` applies the **noise-margin acceptance rule**: accepted iff you win *any* board beyond its margin — arm64 time by **> max(0.5 s, 2·σ)**, x86 time ratio by **> max(1.5%, 2·σ)**, or either board's peak RSS by **> 75 MiB**. Wall-clock is noisy; epsilon "wins" don't promote.
 4. **On accept, the bot commits everything in one go and CI pushes it to `main`**: your submission dir, boards rows, the full grader transcript (`submissions/transcripts/`), an append-only `submissions/log.jsonl` entry (claims vs officials, σ, model, base commit, machine), a regenerated `LEADERBOARD.md` — with `Co-authored-by: <author>`. The verdict is posted back on your PR either way; on reject/failure the canonical boards are untouched.
 
-The boards only ever gain rows; history is never rewritten. The baseline is periodically re-graded (`node promote.mjs --regrade-champion`) and a >10% drift from its trailing median flags the machine before further promotions. The grader's verdict is final — if the pinned baseline verifier rejects your proof, the submission is invalid regardless of its numbers.
+The boards only ever gain rows; history is never rewritten. The baseline is periodically re-graded (`official-grade` workflow, `mode=regrade-champion`) and a >10% drift from its trailing median flags the environment before further promotions. The grader's verdict is final — if the pinned baseline verifier rejects your proof, the submission is invalid regardless of its numbers.
 
 ## Repo layout
 
@@ -138,7 +151,8 @@ promote.mjs      promotion pipeline: build -> grade -> noise-margin acceptance -
 ci/              provisioning + grading scripts for the canonical runner
 .github/         submission-intake (advisory, on PRs) and official-grade (authoritative,
                  maintainer-dispatched) workflows
-boards/          append-only result logs (time.tsv, memory.tsv)
+boards/          append-only result logs (time.tsv, memory.tsv; x86/ ratio boards;
+                 archived eras under archive-*/)
 stacks/          registry of graded provers
 submissions/     SPEC.md, incoming/ submission dirs, append-only log.jsonl,
                  grader transcripts of accepted entries

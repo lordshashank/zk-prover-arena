@@ -126,8 +126,8 @@ async function promote(dir) {
   log(`submission "${sub.name}" by @${sub.author} (model: ${sub.model})`);
   const { touched } = checkPatchPaths(patchText);
   const bests = readBests(); // read BEFORE grading — these are the numbers to beat
-  checkClaims(sub, bests);
-  log(`intake checks pass (${touched.length} files, claims ${sub.claimedTimeS}s/${sub.claimedPeakMiB}MiB vs bests ${bests.time?.value ?? '—'}s/${bests.memory?.value ?? '—'}MiB)`);
+  checkClaims(sub, readBests(undefined, 'baseline')); // claims are local-hardware; pre-filter vs baseline, not bests
+  log(`intake checks pass (${touched.length} files, claims ${sub.claimedTimeS}s/${sub.claimedPeakMiB}MiB local; bests to beat ${bests.time?.value ?? '—'}s/${bests.memory?.value ?? '—'}MiB)`);
 
   let wt = null;
   const scratch = mkdtempSync(join(tmpdir(), 'zkarena-promote-'));

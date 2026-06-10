@@ -64,11 +64,11 @@ Additionally the patch must not:
 
 ## Claimed-score pre-filter (intake)
 
-Before any compute is spent, your **claims** are compared against the current bests (best *valid* rows in `boards/time.tsv` / `boards/memory.tsv`):
+Before any compute is spent, your **claims** are compared against the **baseline's** board rows (not the current bests — your claims come from *your* hardware, and comparing local seconds against the CI fleet's champion would unfairly bounce honest submissions from slower machines):
 
-> A submission is **rejected at intake** if its claims are strictly worse than the current best on **both** boards — i.e. it must claim to at least match the best time **or** the best peak RSS.
+> A submission is **rejected at intake** if its claims are worse than the baseline on **both** axes — i.e. any genuine optimization at least claims to beat the baseline time **or** the baseline peak RSS on its own hardware.
 
-This is deliberately lenient (a claim that merely *ties* a board passes intake — but a tie cannot pass the noise-margin acceptance rule below, so don't bother). The pre-filter exists to stop the canonical machine from burning a ~15-minute build+grade on submissions that don't even claim an improvement. Lying in your claims doesn't help: official numbers are re-measured from scratch, and a submission whose official numbers miss the margin is rejected regardless of what it claimed.
+The pre-filter exists to stop the canonical runners from burning a build+grade on submissions that don't even claim an improvement over the unmodified prover. Lying in your claims doesn't help: official numbers are re-measured from scratch on both canonical environments, and a submission whose official numbers miss every board's margin is rejected regardless of what it claimed.
 
 ## The canonical environments (dual boards)
 
