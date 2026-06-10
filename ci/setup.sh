@@ -68,8 +68,17 @@ if [ ! -x "$HOME/bb-baseline/bb" ]; then
   # configure deps and builds less; prove/verify/write_vk are unaffected. Candidates are
   # built with the same flag (ci/grade.sh exports BB_CMAKE_ARGS), so the comparison is fair.
   cmake --preset default -DBB_LITE=ON >/dev/null
-  # Stream sampled progress lines so the job log shows life during the long build.
-  cmake --build --preset default --target bb 2>&1 | grep --line-buffered -E '^\[[0-9]+/[0-9]+\]|error|Error|FAILED|Linking' | sed -n '1~50p;/error\|Error\|FAILED\|Linking/p'
+  # Stream sampled progress lines for liveness; keep the full log and dump its tail on
+  # failure (linker diagnostics like "undefined reference" don't match progress patterns).
+  set +e
+  cmake --build --preset default --target bb 2>&1 | tee /tmp/bb-build.log | grep --line-buffered -E '^\[[0-9]+/[0-9]+\]' | sed -n '1~50p'
+  build_rc=${PIPESTATUS[0]}
+  set -e
+  if [ "$build_rc" != 0 ]; then
+    echo "=== baseline build FAILED — last 150 lines ==="
+    tail -150 /tmp/bb-build.log
+    exit 1
+  fi
   mkdir -p "$HOME/bb-baseline"
   cp build/bin/bb "$HOME/bb-baseline/bb"
 fi
