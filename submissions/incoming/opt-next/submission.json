@@ -1,0 +1,9 @@
+{
+  "name": "opt-next",
+  "author": "lordshashank",
+  "model": "Claude Fable 5",
+  "notes": "arm64 hand-scheduled Montgomery mul/sqr asm (1.40x field-mul throughput on Apple M-series; gate is currently Apple-silicon-only, so it is dormant on the canonical Neoverse runner); route single-threaded MSMs to legacy Pippenger (the round-parallel rewrite loses 16-20% at 1 thread on Apple arm64); fused Shplonk quotient accumulation + early A_0 release; consume the circuit builder during PK construction with staged polynomial allocation. Claims below were measured on Apple M-series (advisory). See https://github.com/lordshashank/aztec-packages/pull/2 and RESEARCH.md.",
+  "claimedTimeS": 22.82,
+  "claimedPeakMiB": 2290,
+  "patch": "changes.patch"
+}
