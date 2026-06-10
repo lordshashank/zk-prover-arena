@@ -77,6 +77,12 @@ jobs:
             ccache-${{ runner.arch }}-clang20-${{ steps.keys.outputs.base }}-
             ccache-${{ runner.arch }}-clang20-
 
+      - name: Restore CRS (SRS points; downloaded once, ~140MB)
+        uses: actions/cache@v4
+        with:
+          path: ~/.bb-crs
+          key: bb-crs-2pow21-v1
+
       - name: Provision environment (toolchain, nargo, bb base, baseline build)
         run: bash ci/setup.sh
 

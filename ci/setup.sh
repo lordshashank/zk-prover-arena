@@ -93,6 +93,16 @@ if [ ! -x "$HOME/bb-baseline/bb" ]; then
   cp build/bin/bb "$HOME/bb-baseline/bb"
 fi
 "$HOME/bb-baseline/bb" --version || true
+
+echo "== CRS pre-warm + VK determinism check =="
+# First bb use downloads ~140MB of SRS points to ~/.bb-crs — inside a graded run that
+# trips the disk-spill gate (286k block writes). Warm it here (cached across runs), and
+# use the same write_vk to assert the CI-built baseline reproduces the pinned VK exactly.
+mkdir -p /tmp/crswarm
+"$HOME/bb-baseline/bb" write_vk --scheme ultra_honk -b "$ARENA_DIR/problem/problem.json" -o /tmp/crswarm
+cmp /tmp/crswarm/vk "$ARENA_DIR/problem/baseline_vk/vk" || { echo "FATAL: CI-built baseline VK differs from pinned VK — environment/build divergence" >&2; exit 1; }
+echo "VK matches pinned baseline VK"
+
 ccache -s | head -6 || true
 df -h / | tail -1
 echo "setup complete"

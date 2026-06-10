@@ -17,9 +17,22 @@
     "note": "These are the rules of the task, not tunables. Single-threaded so the metric rewards algorithmic work, not parallelization. The proof system is frozen by the pinned baseline VK (problem/baseline_vk/vk): a candidate prover must produce proofs that the PINNED BASELINE verifier accepts against that VK."
   },
   "baseline": {
-    "bb": "barretenberg built from aztec-packages branch `next` @ 7e94c2c0e3 (June 2026), arm64-darwin; binary expected at ~/.bb-next/bb or via BASELINE_BB env",
+    "bb": "barretenberg built from aztec-packages branch `next` @ 7e94c2c0e3 (June 2026), pristine source, standard preset; on the canonical runner it is built by ci/setup.sh (clang-20, preset default); locally place a build at ~/.bb-next/bb or set BASELINE_BB",
     "role": "computes the pinned VK and verifies every candidate's proof (the trust boundary); also the reference row on both boards",
     "nargo": "nargo 1.0.0-beta.22 (noirup)"
+  },
+  "officialEnvironment": {
+    "runner": "GitHub-hosted ubuntu-24.04-arm (free for public repos; official-grade workflow)",
+    "cpu": "Azure Cobalt 100 (Arm Neoverse N2), 4 vCPU, 16 GiB — homogeneous fleet",
+    "toolchain": "clang-20 (apt.llvm.org), cmake preset default, single-thread via HARDWARE_CONCURRENCY=1",
+    "since": "2026-06-10",
+    "calibration": {
+      "medianProveS": 63.67,
+      "peakRssMiB": 1973,
+      "runs": 5,
+      "warmRunSpreadS": "63.57-63.80",
+      "runId": "27281959860"
+    }
   },
   "validity": {
     "soundness": "baseline `bb verify` must accept the candidate's proof against the pinned VK",
@@ -28,16 +41,17 @@
     "complete": "prove must exit 0 and emit proof + public_inputs",
     "budgets": {
       "timeBoardMemBudgetMiB": 4096,
-      "memoryBoardTimeBudgetS": 58.0,
+      "memoryBoardTimeBudgetS": 127.0,
       "maxBlockOutputOps": 1024,
-      "rationale": "Cross-budgets prevent trading one resource for rank on the other board: time entries must stay under the wasm32 4 GB ceiling (browser-transferable; blocks memory-for-speed blowups), memory entries must stay under 2x baseline time (blocks recompute-everything wins). The disk-ops cap closes the mmap/spill loophole (file-backed pages hide from RSS; baseline does 0 block-output ops)."
+      "rationale": "Cross-budgets prevent trading one resource for rank on the other board: time entries must stay under the wasm32 4 GB ceiling (browser-transferable; blocks memory-for-speed blowups), memory entries must stay under 2x baseline time (127.0 = 2x the canonical-runner baseline median 63.67s; blocks recompute-everything wins). The disk-ops cap closes the mmap/spill loophole (file-backed pages hide from RSS; warm baseline does ~40 block-output ops — the proof files). The CRS must be pre-warmed (ci/setup.sh) or its one-time ~140MB download trips the disk gate."
     }
   },
   "grading": {
     "mode": "separate-boards",
     "timeMetric": "median wall-clock seconds of `bb prove` across runs (lower wins)",
     "memoryMetric": "peak resident set size (MiB) of the prove process (lower wins)",
-    "comparability": "numbers are comparable only when graded on the same machine; the canonical boards are produced by the repo maintainer's grader"
+    "comparability": "numbers are comparable only when graded on the same hardware; the canonical boards are produced by the official-grade CI workflow on the officialEnvironment runner. Local numbers are advisory."
   },
-  "v1_archive": "Task v1 (bb v3.0.0-nightly.20260102, nargo beta.18, circuit 1501711 gates) boards archived in boards/archive-v1/; v2 regenerated the circuit/witness from problem/source with nargo beta.22 because next-format bb cannot parse v1 ACIR."
+  "v1_archive": "Task v1 (bb v3.0.0-nightly.20260102, nargo beta.18, circuit 1501711 gates) boards archived in boards/archive-v1/; v2 regenerated the circuit/witness from problem/source with nargo beta.22 because next-format bb cannot parse v1 ACIR.",
+  "v2_macos_archive": "Until 2026-06-10 the v2 boards were graded on the maintainer's Apple M-series (baseline 28.38s/2611MiB); those rows are archived in boards/archive-v2-macos/ and are not comparable with canonical-runner rows."
 }
