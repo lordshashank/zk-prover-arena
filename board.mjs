@@ -100,7 +100,7 @@ ${md(tRows, 'prove time', 'peak RSS')}
 
 ${md(mRows, 'peak RSS', 'prove time')}
 
-_Numbers are comparable only when graded on the same machine — the canonical boards above are produced on the maintainer's grader (Apple M-series arm64, macOS). To get on the board: see "Submitting" in the README._
+_Numbers are comparable only when graded on the same hardware — the canonical boards above are produced by the \`official-grade\` CI workflow on GitHub-hosted \`ubuntu-24.04-arm\` runners (Azure Cobalt 100 / Neoverse N2, 4 vCPU): one homogeneous, publicly reproducible fleet. Local numbers are advisory. To get on the board: see "Submitting" in the README._
 `;
   writeFileSync(resolve(__dirname, 'LEADERBOARD.md'), out);
   console.log('  wrote LEADERBOARD.md\n');

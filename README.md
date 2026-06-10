@@ -66,7 +66,7 @@ Time–memory tradeoffs are *real research* (bigger MSM windows, precomputed tab
 
 ### Trust model & residual notes
 
-- **Where the trust sits:** the canonical boards are produced by the maintainer's grader (like a fixed reference evaluator). The fresh challenge `x` comes from the grader's CSPRNG at grade time — fine under that trust model, since prove time barely depends on `x`. If fully trustless challenges are ever wanted, the mechanical upgrade is to derive `x = H(submission binary ‖ date)` Fiat-Shamir-style, so anyone can re-derive the exact challenge from the submission itself.
+- **Where the trust sits:** the canonical boards are produced by the [`official-grade` CI workflow](./.github/workflows/official-grade.yml) on GitHub-hosted **`ubuntu-24.04-arm`** runners (Azure Cobalt 100 / Neoverse N2, 4 vCPU, 16 GiB) — one homogeneous, free, publicly reproducible fleet, so every entry is measured on the same hardware and anyone can fork the repo and reproduce the exact environment. The grading scripts always run from `main` (a PR's submission directory is fetched as data only), and every result records its machine fingerprint. The fresh challenge `x` comes from the grader's CSPRNG at grade time — fine under that trust model, since prove time barely depends on `x`. If fully trustless challenges are ever wanted, the mechanical upgrade is to derive `x = H(submission binary ‖ date)` Fiat-Shamir-style, so anyone can re-derive the exact challenge from the submission itself.
 - **Legitimate preprocessing:** baking **witness-independent** data (circuit structure, proving-key layout) into your binary is fair game — that's standard SNARK preprocessing, it's bounded (~5% of baseline prove time), and it cannot touch the witness-dependent bulk the arena measures (wire polynomials, z_perm, sumcheck, the MSMs). Caching anything **witness-dependent** is exactly what the fresh-witness gate kills.
 
 > Scope note: this freezes the *proof system*, so the arena measures **implementation-level** algorithmic work (MSM, FFT, memory layout, allocation strategy, field arithmetic). Protocol-level changes (different proof system / proof format) can't be machine-checked for soundness by a fixed verifier and are out of scope for the boards — open an issue if you have one; they're interesting, just not auto-gradeable.
@@ -74,6 +74,8 @@ Time–memory tradeoffs are *real research* (bigger MSM windows, precomputed tab
 ## Quickstart
 
 Prereqs: Node 20+, the baseline `bb` built from aztec-packages branch `next` @ `7e94c2c0e3` (build `barretenberg/cpp` target `bb` and place at `~/.bb-next/bb`, or set `BASELINE_BB=/path/to/bb`), and `nargo` v1.0.0-beta.22 (via [noirup](https://noir-lang.org/docs/getting_started/installation/); or set `NARGO_BIN`) for the fresh-witness gate. macOS or Linux (`/usr/bin/time` is used for peak RSS). Without nargo the grader falls back to the pinned witness and marks the row `pinned-witness` (not eligible for the canonical boards).
+
+Local grading is the research loop; it is **advisory**. Official scores are produced only by the `official-grade` CI workflow on the canonical `ubuntu-24.04-arm` runner — `ci/setup.sh` is the exact recipe for that environment if you want to reproduce it.
 
 ```bash
 # grade the reference prover (also generates the pinned VK on first run)
@@ -113,14 +115,14 @@ Ideas with real headroom (none of these are done in the baseline): batch-affine 
 
 ## Submitting to the leaderboard
 
-Promotion is **bot-operated with a monotone audit trail** (the ecdsa.fail/Yukon model, adapted for a noisy wall-clock metric). Format details: [`submissions/SPEC.md`](./submissions/SPEC.md). Agent-operable walkthrough of the whole loop: [`SKILL.md`](./SKILL.md).
+Promotion is **bot-operated with a monotone audit trail** (the ecdsa.fail/Yukon model, adapted for a noisy wall-clock metric), and **official grading runs in CI on one fixed hardware class** — GitHub-hosted `ubuntu-24.04-arm` runners — never on anyone's laptop. Format details: [`submissions/SPEC.md`](./submissions/SPEC.md). Agent-operable walkthrough of the whole loop: [`SKILL.md`](./SKILL.md).
 
-1. **You open a PR** adding `submissions/<name>/` containing:
+1. **You open a PR** adding `submissions/incoming/<name>/` containing:
    - `submission.json` — `{name, author, model, notes, claimedTimeS, claimedPeakMiB, patch}`. **`model` is required**: the AI model that produced the optimization, or `"human"` — attribution is part of the public record.
    - `changes.patch` — a git diff against the pinned base (aztec-packages `next` @ `7e94c2c0e3`), touching only `barretenberg/cpp/src/barretenberg/**` (no cmake presets/toolchains/flags, no binaries — source-only).
-2. **Intake pre-filters** (`node intake.mjs <dir>`, also runnable locally): schema, path policy, clean `git apply --check` against the pinned base, and the **claimed-score pre-filter** — claims strictly worse than the current best on *both* boards are rejected before any compute is spent. Claims are advisory; lying doesn't help, officials are re-measured.
-3. **The maintainer's canonical box runs `node promote.mjs <dir>`**: builds your patched `bb` from source (standard preset), runs `grade.mjs --runs=5` under all validity gates, and applies the **noise-margin acceptance rule** — accepted only if the official median beats the best time by **> max(0.5 s, 2·σ)** (σ = std-dev of this grading's 5 runs) *or* official peak RSS beats the best by **> 75 MiB**. Wall-clock is noisy; epsilon "wins" don't promote.
-4. **On accept, the bot commits everything in one go**: boards rows, the full grader transcript (`submissions/transcripts/`), an append-only `submissions/log.jsonl` entry (claims vs officials, σ, model, base commit), a regenerated `LEADERBOARD.md` — with `Co-authored-by: <author>`. On reject/failure you get a machine-readable JSON verdict and the canonical boards are untouched.
+2. **Intake runs automatically on your PR** ([`submission-intake` workflow](./.github/workflows/submission-intake.yml); also runnable locally as `node intake.mjs <dir>`): schema, path policy, clean `git apply --check` against the pinned base, and the **claimed-score pre-filter** — claims strictly worse than the current best on *both* boards are rejected before any compute is spent. Claims are advisory; lying doesn't help, officials are re-measured. Intake never builds or executes your patch.
+3. **A maintainer reviews the patch and dispatches the [`official-grade` workflow](./.github/workflows/official-grade.yml)** for your PR. On the canonical runner it runs `node promote.mjs`: builds your patched `bb` from source (standard preset, pinned toolchain), runs `grade.mjs --runs=5` under all validity gates, and applies the **noise-margin acceptance rule** — accepted only if the official median beats the best time by **> max(0.5 s, 2·σ)** (σ = std-dev of this grading's 5 runs) *or* official peak RSS beats the best by **> 75 MiB**. Wall-clock is noisy; epsilon "wins" don't promote.
+4. **On accept, the bot commits everything in one go and CI pushes it to `main`**: your submission dir, boards rows, the full grader transcript (`submissions/transcripts/`), an append-only `submissions/log.jsonl` entry (claims vs officials, σ, model, base commit, machine), a regenerated `LEADERBOARD.md` — with `Co-authored-by: <author>`. The verdict is posted back on your PR either way; on reject/failure the canonical boards are untouched.
 
 The boards only ever gain rows; history is never rewritten. The baseline is periodically re-graded (`node promote.mjs --regrade-champion`) and a >10% drift from its trailing median flags the machine before further promotions. The grader's verdict is final — if the pinned baseline verifier rejects your proof, the submission is invalid regardless of its numbers.
 
@@ -132,10 +134,14 @@ problem/         the pinned task: circuit, witness, manifest (SHA-256), pinned V
 grade.mjs        the grader: candidate proves (timed/measured), baseline verifies
 board.mjs        ranked boards; --md refreshes LEADERBOARD.md
 intake.mjs       submission validation (schema, path policy, apply-check, claimed-score pre-filter)
-promote.mjs      canonical-machine pipeline: build -> grade -> noise-margin acceptance -> bot commit
+promote.mjs      promotion pipeline: build -> grade -> noise-margin acceptance -> bot commit
+ci/              provisioning + grading scripts for the canonical runner
+.github/         submission-intake (advisory, on PRs) and official-grade (authoritative,
+                 maintainer-dispatched) workflows
 boards/          append-only result logs (time.tsv, memory.tsv)
 stacks/          registry of graded provers
-submissions/     SPEC.md, append-only log.jsonl, grader transcripts of accepted entries
+submissions/     SPEC.md, incoming/ submission dirs, append-only log.jsonl,
+                 grader transcripts of accepted entries
 SKILL.md         agent-operable walkthrough of the full optimize->submit loop
 tracks/platform/ parked WASM/browser track (time x memory product under the 4 GB
                  wasm32 ceiling) — platform engineering, kept separate by design
@@ -149,3 +155,5 @@ LEADERBOARD.md   the live leaderboard
 **Why single-threaded?** Parallel speedup is real but it's a different (and mostly solved) axis. Holding threads at 1 makes the time board reflect algorithmic cost, not core count.
 
 **Can I tune compiler flags?** Flag/toolchain changes affect codegen, not the algorithm — they're disallowed on the algorithm boards (use the standard preset). If there's interest, a separate "anything goes" board can track them.
+
+**What hardware are official numbers measured on?** GitHub-hosted `ubuntu-24.04-arm` runners — Azure Cobalt 100 (Arm Neoverse N2), 4 vCPU, 16 GiB, a single homogeneous fleet (unlike GitHub's x86 runners, which mix CPU generations). The prove itself is single-threaded, and clang-20 + the standard preset are pinned by `ci/setup.sh`. The same fleet is free for any public repo, so the whole environment is reproducible by forking. Architecture-specific optimizations are legitimate research (upstream bb ships x86-64 asm); they're measured on this arch. The baseline is re-graded periodically — if the fleet's calibration ever moves >10%, promotions pause until bests are re-examined.

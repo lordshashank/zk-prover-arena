@@ -5,7 +5,7 @@ description: Operate the zk-prover-arena optimization loop end-to-end — get th
 
 # zk-prover-arena — the agent-operable submission loop
 
-The arena measures one thing: a `bb prove` on the frozen 2^21 task, single-threaded, on the maintainer's canonical machine. Your job is to make that cheaper (time and/or peak RSS) by patching the prover source — nothing else is a variable. Full rules: [README.md](./README.md); submission format and acceptance rule: [submissions/SPEC.md](./submissions/SPEC.md).
+The arena measures one thing: a `bb prove` on the frozen 2^21 task, single-threaded, on the canonical environment — GitHub-hosted `ubuntu-24.04-arm` CI runners (Azure Cobalt 100 / Neoverse N2, 4 vCPU; provisioned exactly by [`ci/setup.sh`](./ci/setup.sh)). Your job is to make that cheaper (time and/or peak RSS) by patching the prover source — nothing else is a variable. Your local hardware is for iterating; only the canonical runner's numbers rank, so arch-specific work should target arm64/Neoverse. Full rules: [README.md](./README.md); submission format and acceptance rule: [submissions/SPEC.md](./submissions/SPEC.md).
 
 ## 0. One-time setup
 
@@ -75,13 +75,14 @@ BB_REPO=/abs/path/to/aztec-packages node intake.mjs my-opt-submission
 
 ## 3. Submit
 
-- **Normal path (you are a contributor):** open a PR against this repo adding `submissions/<name>/` (the directory above). The maintainer's canonical box runs `node promote.mjs submissions/<name>` — build from source, 5 graded runs, acceptance rule, bot commit on accept.
-- **You ARE the canonical machine (maintainer):** run it yourself:
+- **Normal path (you are a contributor):** open a PR against this repo adding `submissions/incoming/<name>/` (the directory above). The `submission-intake` workflow validates it automatically (advisory). A maintainer reviews the patch and dispatches the **`official-grade`** workflow (mode=`submission`, submission=`<name>`, pr=`<your PR number>`) — it builds from source on the canonical `ubuntu-24.04-arm` runner, runs 5 graded runs, applies the acceptance rule, pushes the bot commit on accept, and comments the JSON verdict on your PR either way.
+- **You are a maintainer:** dispatch it from the CLI:
   ```bash
-  node promote.mjs <submission-dir>              # full pipeline + bot commit on accept
-  node promote.mjs <submission-dir> --dry-run    # intake + apply + cmake configure only
-  node promote.mjs --regrade-champion            # periodic baseline drift check (>10% warns)
+  gh workflow run official-grade.yml -f mode=submission -f submission=<name> -f pr=<N>
+  gh workflow run official-grade.yml -f mode=regrade-champion   # baseline drift check (>10% warns)
+  gh workflow run official-grade.yml -f mode=calibrate          # re-measure baseline, artifact only
   ```
+  (`node promote.mjs <dir>` / `--regrade-champion` is the same pipeline runnable locally — useful for debugging, but local results are not official.)
 
 `promote.mjs` prints exactly one JSON verdict on stdout (`accepted` / `rejected` / `failed` / `dry-run`); everything else streams to stderr.
 
@@ -96,11 +97,11 @@ BB_REPO=/abs/path/to/aztec-packages node intake.mjs my-opt-submission
 | `rejected: claimed-score pre-filter` | claims don't even match the current best on either board | you're not claiming an improvement — keep optimizing, or re-measure with `--runs=5`; do NOT inflate claims (officials are re-measured anyway) |
 | `failed: build` (stage configure/compile) | patched source doesn't build with the standard preset | reproduce locally: fresh worktree of the base, apply your patch, `cmake --preset homebrew && cmake --build --preset homebrew --target bb`; fix; resubmit |
 | `rejected: gates` | proof invalid / wrong output / >1 thread / disk spill | your optimization broke correctness or violates the frozen config — run `node grade.mjs` locally and check each gate line; common causes: changed *what* is committed (VK mismatch), threading sneaking in, mmap/spill tricks |
-| `rejected: noise-margin` | real but too-small improvement (or canonical machine disagrees with yours) | find more headroom; margins are in the verdict (`margins.timeS`, `margins.memMiB`). Hardware differs — only canonical numbers count |
+| `rejected: noise-margin` | real but too-small improvement (or the canonical runner disagrees with your machine) | find more headroom; margins are in the verdict (`margins.timeS`, `margins.memMiB`). Hardware differs — only canonical-runner numbers count (e.g. Apple-specific wins may vanish on Neoverse) |
 | `failed: grade` with timeout | a run exceeded 600 s — process group killed | something pathological (deadlock, swap death); profile locally at 2^21 |
 
 ## 5. Ground rules (will get a submission rejected on review even if checks pass)
 
 - No caching anything **witness-dependent** (the fresh-witness gate kills it anyway); witness-independent preprocessing is fair game (see README "Trust model").
-- No build-time network fetches or other supply-chain tricks in the patch — builds run unsandboxed on the canonical box (documented limitation; patches are human-reviewed).
+- No build-time network fetches or other supply-chain tricks in the patch — builds run on a throwaway CI VM but with network access (documented limitation; patches are human-reviewed before grading is dispatched).
 - One optimization theme per submission where practical — it keeps the audit log legible and results attributable.

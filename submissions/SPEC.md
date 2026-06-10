@@ -1,12 +1,14 @@
 # Submission spec — zk-prover-arena
 
-A **submission** is a directory (usually added via PR) containing exactly two things:
+A **submission** is a directory at `submissions/incoming/<name>/` (added via PR) containing exactly two things:
 
 ```
-my-submission/
+submissions/incoming/my-submission/
   submission.json     the manifest (schema below)
   changes.patch       a git diff against the pinned bb base commit
 ```
+
+Opening the PR triggers the advisory `submission-intake` workflow; a maintainer then dispatches `official-grade` (mode=submission, with your PR number) to grade it on the canonical runner — see "The canonical environment" below.
 
 The pinned base is **aztec-packages `next` @ `7e94c2c0e32820e25e20d39a426d546dae56a34f`**. Your patch must apply cleanly (`git apply --check`) to that exact commit — not to `next` HEAD, not to your fork's tip.
 
@@ -68,12 +70,25 @@ Before any compute is spent, your **claims** are compared against the current be
 
 This is deliberately lenient (a claim that merely *ties* a board passes intake — but a tie cannot pass the noise-margin acceptance rule below, so don't bother). The pre-filter exists to stop the canonical machine from burning a ~15-minute build+grade on submissions that don't even claim an improvement. Lying in your claims doesn't help: official numbers are re-measured from scratch, and a submission whose official numbers miss the margin is rejected regardless of what it claimed.
 
+## The canonical environment
+
+Official numbers are produced **only** by the [`official-grade`](../.github/workflows/official-grade.yml) workflow, dispatched by a maintainer, on GitHub-hosted **`ubuntu-24.04-arm`** runners:
+
+| | |
+|---|---|
+| hardware | Azure Cobalt 100 (Arm Neoverse N2), 4 vCPU, 16 GiB — one homogeneous fleet |
+| OS / toolchain | ubuntu-24.04, clang-20 (apt.llvm.org), cmake preset `default` + `-DBB_LITE=ON` |
+| provisioning | [`ci/setup.sh`](../ci/setup.sh) — the executable definition of the environment |
+| fingerprint | every grade records its machine label (boards transcripts + `log.jsonl`) |
+
+Baseline and candidates are built with the identical preset/flags, and graded back-to-back on the same fleet, so deltas are attributable to the patch. Your local numbers (any OS/CPU) select what to submit; they never rank.
+
 ## Official grading & the acceptance rule (noise margin)
 
-Wall-clock is noisy, so acceptance is **margin-based**, not "any epsilon wins". On the canonical machine, `promote.mjs`:
+Wall-clock is noisy, so acceptance is **margin-based**, not "any epsilon wins". On the canonical runner, `promote.mjs`:
 
 1. re-runs intake,
-2. builds your patched `bb` from source (preset `homebrew`, the standard release preset — same as the baseline build),
+2. builds your patched `bb` from source (the standard release preset for the platform — same as the baseline build),
 3. runs `node grade.mjs --runs=5` with all the validity gates from the README (fresh witness, baseline verify, single-thread, disk cap, cross-budgets),
 4. computes **sigma** = the *sample standard deviation of the 5 prove times within this grading run* (run-to-run noise, measured fresh every time rather than assumed),
 5. applies the **acceptance rule** — the submission is accepted iff at least one of:
@@ -101,16 +116,11 @@ History is never rewritten; a dethroned champion's rows stay on the boards (rank
 
 ## Champion / baseline drift watch
 
-Wall-clock bests can rot if the canonical machine changes (OS update, thermals, background load). Periodically the maintainer runs:
-
-```bash
-node promote.mjs --regrade-champion
-```
-
-which re-grades the **baseline** stack (`--runs=5`, appended to the boards as usual) and compares the new median against the *trailing median of baseline's valid time-board rows*. If it deviates by **more than 10%**, the run warns loudly (exit 1): the machine's calibration has moved, and current bests / margins should be re-examined (typically by re-grading the champion's retained build and, if needed, annotating the boards) before any further promotions.
+Wall-clock bests can rot if the canonical environment changes (runner image update, fleet hardware refresh). Periodically the maintainer dispatches `official-grade` with `mode=regrade-champion` (locally: `node promote.mjs --regrade-champion`), which re-grades the **baseline** stack (`--runs=5`, appended to the boards as usual) and compares the new median against the *trailing median of baseline's valid time-board rows*. If it deviates by **more than 10%**, the run warns loudly (exit 1): the environment's calibration has moved, and current bests / margins should be re-examined (typically by re-grading the champion's retained submission and, if needed, annotating the boards) before any further promotions. If GitHub ever changes the runner hardware class outright, the environment is re-calibrated (`mode=calibrate`) and the boards are archived and reseeded, exactly as was done for the laptop→CI move.
 
 ## Trust model & known limitations
 
-- **Canonical machine**: official numbers exist only on the maintainer's grader (Apple M-series arm64, macOS). Your local numbers select what to submit; they never rank.
-- **Build runs unsandboxed**: `cmake`/`ninja` on the canonical machine currently have **network access and no syscall sandbox** during the build. This is a documented limitation, not a guarantee — the editablePaths policy plus human review of the patch (it's a PR) is the current mitigation. Don't submit patches with build-time network fetches or codegen that phones home; they'll be rejected on review and the author banned from the boards.
+- **Canonical environment**: official numbers are produced only by CI on GitHub-hosted `ubuntu-24.04-arm` runners (see above) — never on anyone's personal machine. Only maintainers can dispatch official grading, every executed script comes from `main` (a PR's submission dir is fetched as *data*), and the bot commit + transcript + `log.jsonl` row are pushed by the workflow itself, so the full chain from patch to board row is auditable in the Actions log.
+- **The patch still runs as code**: building and grading a submission executes it — that is the point — but it happens inside a throwaway CI VM with a token that can only touch this repo. Builds have network access (documented limitation): don't submit patches with build-time network fetches or codegen that phones home; they'll be rejected on review and the author banned from the boards.
 - **Grading is hardened**: each `bb prove` run inherits the grade-time gates (fresh witness, pinned-baseline verify, single-thread, disk cap), the grader is run in its own process group and killed wholesale on timeout (600 s per run), and a run that fails to emit `proof`/`public_inputs` fails closed.
+- **Advisory checks on PRs** (`submission-intake` workflow) run intake from the PR's own checkout — convenient, but not a security boundary; official grading re-runs intake from `main`'s scripts before any build.
