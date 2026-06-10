@@ -28,6 +28,8 @@
 // Usage:
 //   node grade.mjs --stack=baseline
 //   node grade.mjs --stack=my-msm-fix --bb=/abs/path/to/modified/bb
+//   --json=<file>   also emit a machine-readable result {medianS, peakMiB, runs:[...], gates:{...}}
+//   --boards=<dir>  append rows to <dir> instead of ./boards (promote.mjs isolates candidate runs)
 import { spawnSync } from 'node:child_process';
 import { readFileSync, existsSync, appendFileSync, mkdirSync, rmSync, writeFileSync, cpSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
@@ -42,6 +44,7 @@ const args = Object.fromEntries(process.argv.slice(2).map((s) => {
 
 const runs = args.runs ? parseInt(args.runs) : 3;
 const stackName = args.stack || 'baseline';
+const BOARDS_DIR = args.boards ? resolve(args.boards) : resolve(__dirname, 'boards');
 const manifest = JSON.parse(readFileSync(resolve(__dirname, 'problem', 'manifest.json'), 'utf8'));
 const BUDGET = manifest.validity.budgets;
 const BASELINE_BB = process.env.BASELINE_BB || resolve(homedir(), '.bb-next', 'bb');
@@ -150,11 +153,12 @@ console.log(`candidate bb: ${candidateBB}`);
 console.log(`fresh witness per run: ${haveNargo ? 'yes (nargo)' : 'NO — pinned-witness fallback, output gate skipped'}`);
 console.log(`budgets: time board needs peakRSS<=${BUDGET.timeBoardMemBudgetMiB}MiB; memory board needs time<=${BUDGET.memoryBoardTimeBudgetS}s; diskOps<=${BUDGET.maxBlockOutputOps}; runs=${runs}\n`);
 
-const times = []; const peaks = []; const disks = [];
+const times = []; const peaks = []; const disks = []; const runDetails = [];
 let allVerified = true, allOutputs = true, ok = true, lastErr = null, threadViolation = false, anyFresh = false;
 for (let r = 0; r < runs; r++) {
   const res = gradedRun(r);
   if (!res.ok) { ok = false; lastErr = res.err; break; }
+  runDetails.push({ proveS: res.proveS, peakMiB: res.peakMiB, diskOps: res.diskOps, verified: res.verified, outputMatch: res.outputMatch, threadsUsed: res.threadsUsed, fresh: res.fresh });
   if (res.threadsUsed != null && res.threadsUsed !== 1) threadViolation = true;
   times.push(res.proveS); peaks.push(res.peakMiB);
   if (res.diskOps != null) disks.push(res.diskOps);
@@ -180,7 +184,7 @@ console.log(`  time board: ${timeBoardValid ? 'VALID' : 'INVALID'} (mem budget $
 const iso = args.now || new Date().toISOString();
 const note = [ok ? '' : 'ERR', anyFresh ? '' : 'pinned-witness', diskOk ? '' : 'disk-spill'].filter(Boolean).join(',');
 function append(file, header, row) {
-  const p = resolve(__dirname, 'boards', file);
+  const p = resolve(BOARDS_DIR, file);
   mkdirSync(dirname(p), { recursive: true });
   if (!existsSync(p)) appendFileSync(p, header.join('\t') + '\n');
   appendFileSync(p, row.join('\t') + '\n');
@@ -190,3 +194,13 @@ append('time.tsv', ['iso', 'stack', 'task', 'median_prove_s', 'peak_rss_MiB', 'v
 append('memory.tsv', ['iso', 'stack', 'task', 'peak_rss_MiB', 'median_prove_s', 'verified', 'valid', 'note'],
   [iso, stackName, manifest.name, peakMiB != null ? peakMiB.toFixed(0) : '', medS ?? '', allVerified ? 1 : 0, memBoardValid ? 1 : 0, note]);
 console.log(`  appended to boards/ — \`node board.mjs --md\` refreshes LEADERBOARD.md\n`);
+
+if (args.json) {
+  writeFileSync(resolve(args.json), JSON.stringify({
+    iso, task: manifest.name, stack: stackName, bb: candidateBB, runsRequested: runs,
+    medianS: medS, peakMiB: peakMiB != null ? +peakMiB.toFixed(0) : null, maxDiskOps: maxDisk,
+    runs: runDetails,
+    gates: { soundness: allVerified, freshOutput: allOutputs && anyFresh, singleThread: !threadViolation, disk: diskOk, complete: ok },
+    timeBoardValid, memBoardValid, note, error: ok ? null : String(lastErr),
+  }, null, 2) + '\n');
+}
