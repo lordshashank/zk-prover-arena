@@ -44,7 +44,7 @@ const runs = args.runs ? parseInt(args.runs) : 3;
 const stackName = args.stack || 'baseline';
 const manifest = JSON.parse(readFileSync(resolve(__dirname, 'problem', 'manifest.json'), 'utf8'));
 const BUDGET = manifest.validity.budgets;
-const BASELINE_BB = process.env.BASELINE_BB || resolve(homedir(), '.bb', 'bb');
+const BASELINE_BB = process.env.BASELINE_BB || resolve(homedir(), '.bb-next', 'bb');
 const NARGO = process.env.NARGO_BIN || resolve(homedir(), '.nargo', 'bin', 'nargo');
 
 let candidateBB = args.bb;
@@ -68,7 +68,7 @@ const haveNargo = existsSync(NARGO) && existsSync(resolve(SOURCE_PKG, 'Nargo.tom
 if (!existsSync(VK)) {
   console.log('  [setup] computing pinned baseline VK (one-time, baseline bb)...');
   mkdirSync(VK_DIR, { recursive: true });
-  const r = spawnSync(BASELINE_BB, ['write_vk', '-b', CIRCUIT, '-o', VK_DIR], { env: ENV1, encoding: 'utf8' });
+  const r = spawnSync(BASELINE_BB, ['write_vk', '--scheme', 'ultra_honk', '-b', CIRCUIT, '-o', VK_DIR], { env: ENV1, encoding: 'utf8' });
   if (r.status !== 0 || !existsSync(VK)) throw new Error(`baseline write_vk failed: ${(r.stderr || '').slice(-300)}`);
 }
 
@@ -103,7 +103,7 @@ function gradedRun(i) {
     const isLinux = process.platform === 'linux';
     const t0 = process.hrtime.bigint();
     const p = spawnSync('/usr/bin/time',
-      [isLinux ? '-v' : '-l', candidateBB, 'prove', '-b', CIRCUIT, '-w', witnessPath, '-k', VK, '-o', outDir],
+      [isLinux ? '-v' : '-l', candidateBB, 'prove', '--scheme', 'ultra_honk', '-b', CIRCUIT, '-w', witnessPath, '-k', VK, '-o', outDir],
       { env: ENV1, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
     const proveS = Number(process.hrtime.bigint() - t0) / 1e9;
     if (p.status !== 0) return { ok: false, err: `prove exit ${p.status}: ${(p.stderr || '').slice(-300)}` };
@@ -134,7 +134,7 @@ function gradedRun(i) {
     // Gate: pinned baseline verifier, pinned VK.
     let verified = false;
     if (existsSync(proofPath) && existsSync(pubPath)) {
-      const v = spawnSync(BASELINE_BB, ['verify', '-p', proofPath, '-k', VK, '-i', pubPath], { env: ENV1, encoding: 'utf8' });
+      const v = spawnSync(BASELINE_BB, ['verify', '--scheme', 'ultra_honk', '-p', proofPath, '-k', VK, '-i', pubPath], { env: ENV1, encoding: 'utf8' });
       verified = v.status === 0;
     }
     return { ok: true, proveS, peakMiB, diskOps, verified, outputMatch, threadsUsed, fresh };

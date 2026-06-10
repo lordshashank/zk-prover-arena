@@ -24,7 +24,7 @@ Reducing those is genuine ZK research, and every win here transfers to every env
 
 | | |
 |---|---|
-| circuit | deterministic Poseidon2-permutation chain, **1,501,711 gates → pads to 2^21** |
+| circuit | deterministic Poseidon2-permutation chain, **1,501,674 gates → pads to 2^21** (v2, nargo beta.22) |
 | witness | pinned (`problem.gz`) |
 | integrity | SHA-256 of both pinned in [`problem/manifest.json`](./problem/manifest.json) |
 | proof system | UltraHonk, poseidon2 oracle, ZK on (bb defaults) — **frozen by the pinned VK** |
@@ -73,7 +73,7 @@ Time–memory tradeoffs are *real research* (bigger MSM windows, precomputed tab
 
 ## Quickstart
 
-Prereqs: Node 20+, the baseline `bb` v3.0.0-nightly.20260102 (install via [bbup](https://github.com/AztecProtocol/aztec-packages/tree/master/barretenberg/bbup); or set `BASELINE_BB=/path/to/bb`), and `nargo` v1.0.0-beta.18 (via [noirup](https://noir-lang.org/docs/getting_started/installation/); or set `NARGO_BIN`) for the fresh-witness gate. macOS or Linux (`/usr/bin/time` is used for peak RSS). Without nargo the grader falls back to the pinned witness and marks the row `pinned-witness` (not eligible for the canonical boards).
+Prereqs: Node 20+, the baseline `bb` built from aztec-packages branch `next` @ `7e94c2c0e3` (build `barretenberg/cpp` target `bb` and place at `~/.bb-next/bb`, or set `BASELINE_BB=/path/to/bb`), and `nargo` v1.0.0-beta.22 (via [noirup](https://noir-lang.org/docs/getting_started/installation/); or set `NARGO_BIN`) for the fresh-witness gate. macOS or Linux (`/usr/bin/time` is used for peak RSS). Without nargo the grader falls back to the pinned witness and marks the row `pinned-witness` (not eligible for the canonical boards).
 
 ```bash
 # grade the reference prover (also generates the pinned VK on first run)
@@ -89,7 +89,7 @@ node board.mjs --md
 
 ## How to optimize (the research loop)
 
-1. **Get the barretenberg source** (the baseline is `v3.0.0-nightly` / aztec-packages around `d30992f`):
+1. **Get the barretenberg source** (the baseline is aztec-packages branch `next` @ `7e94c2c0e3` — the task tracks upstream so optimizations can be merged directly; task v1, pinned to `v3.0.0-nightly.20260102`, is archived in `boards/archive-v1/`):
    ```bash
    git clone https://github.com/AztecProtocol/aztec-packages
    cd aztec-packages/barretenberg/cpp

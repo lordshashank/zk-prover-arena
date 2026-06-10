@@ -1,0 +1,7 @@
+iso	stack	task	peak_rss_MiB	median_prove_s	verified	valid	note
+2026-06-09T18:48:20.925Z	baseline	hard2pow21	3453	30.85	1	1	
+2026-06-09T21:03:54.664Z	sparse-gemini-mask	hard2pow21	3067	27.94	1	1	
+2026-06-09T22:45:46.285Z	sparsemask-arm64asm	hard2pow21	3504	23.35	1	1	
+2026-06-10T02:07:52.556Z	legacymsm-signed-dedup	hard2pow21	3509	950.18	1	0	
+2026-06-10T02:53:20.734Z	opt-asm-fused	hard2pow21	3425	23.76	1	1	
+2026-06-10T03:31:10.803Z	opt-asm-pkmem	hard2pow21	3152	23.08	1	1	
