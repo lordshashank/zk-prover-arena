@@ -113,12 +113,16 @@ Ideas with real headroom (none of these are done in the baseline): batch-affine 
 
 ## Submitting to the leaderboard
 
-Open a PR that adds your entry to `stacks/registry.json` with:
-- a **diff/patch** (or branch link) against the baseline barretenberg source — submissions must be reproducible from source, binaries alone aren't accepted,
-- build instructions if they differ from the standard preset,
-- your local numbers (`node grade.mjs` output) as a sanity reference.
+Promotion is **bot-operated with a monotone audit trail** (the ecdsa.fail/Yukon model, adapted for a noisy wall-clock metric). Format details: [`submissions/SPEC.md`](./submissions/SPEC.md). Agent-operable walkthrough of the whole loop: [`SKILL.md`](./SKILL.md).
 
-The maintainer regrades every submission on the canonical machine (numbers are only comparable on the same hardware) and refreshes `LEADERBOARD.md`. The grader's verdict is final — if the baseline verifier rejects your proof, the submission is invalid regardless of its numbers.
+1. **You open a PR** adding `submissions/<name>/` containing:
+   - `submission.json` — `{name, author, model, notes, claimedTimeS, claimedPeakMiB, patch}`. **`model` is required**: the AI model that produced the optimization, or `"human"` — attribution is part of the public record.
+   - `changes.patch` — a git diff against the pinned base (aztec-packages `next` @ `7e94c2c0e3`), touching only `barretenberg/cpp/src/barretenberg/**` (no cmake presets/toolchains/flags, no binaries — source-only).
+2. **Intake pre-filters** (`node intake.mjs <dir>`, also runnable locally): schema, path policy, clean `git apply --check` against the pinned base, and the **claimed-score pre-filter** — claims strictly worse than the current best on *both* boards are rejected before any compute is spent. Claims are advisory; lying doesn't help, officials are re-measured.
+3. **The maintainer's canonical box runs `node promote.mjs <dir>`**: builds your patched `bb` from source (standard preset), runs `grade.mjs --runs=5` under all validity gates, and applies the **noise-margin acceptance rule** — accepted only if the official median beats the best time by **> max(0.5 s, 2·σ)** (σ = std-dev of this grading's 5 runs) *or* official peak RSS beats the best by **> 75 MiB**. Wall-clock is noisy; epsilon "wins" don't promote.
+4. **On accept, the bot commits everything in one go**: boards rows, the full grader transcript (`submissions/transcripts/`), an append-only `submissions/log.jsonl` entry (claims vs officials, σ, model, base commit), a regenerated `LEADERBOARD.md` — with `Co-authored-by: <author>`. On reject/failure you get a machine-readable JSON verdict and the canonical boards are untouched.
+
+The boards only ever gain rows; history is never rewritten. The baseline is periodically re-graded (`node promote.mjs --regrade-champion`) and a >10% drift from its trailing median flags the machine before further promotions. The grader's verdict is final — if the pinned baseline verifier rejects your proof, the submission is invalid regardless of its numbers.
 
 ## Repo layout
 
@@ -127,8 +131,12 @@ problem/         the pinned task: circuit, witness, manifest (SHA-256), pinned V
                  and source/ (the Noir package the grader uses for fresh witnesses)
 grade.mjs        the grader: candidate proves (timed/measured), baseline verifies
 board.mjs        ranked boards; --md refreshes LEADERBOARD.md
+intake.mjs       submission validation (schema, path policy, apply-check, claimed-score pre-filter)
+promote.mjs      canonical-machine pipeline: build -> grade -> noise-margin acceptance -> bot commit
 boards/          append-only result logs (time.tsv, memory.tsv)
 stacks/          registry of graded provers
+submissions/     SPEC.md, append-only log.jsonl, grader transcripts of accepted entries
+SKILL.md         agent-operable walkthrough of the full optimize->submit loop
 tracks/platform/ parked WASM/browser track (time x memory product under the 4 GB
                  wasm32 ceiling) — platform engineering, kept separate by design
 LEADERBOARD.md   the live leaderboard
