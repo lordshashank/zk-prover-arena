@@ -11,12 +11,14 @@ Each board is ranked by its own metric (**bold**), but shows the other metric to
 
 | # | prover | prove time | vs baseline | peak RSS | vs baseline | date |
 |---|--------|------|------|------|------|------|
-| 1 | baseline | **35.43 s** | baseline | 2587 MiB | baseline | 2026-06-10 |
+| 1 | opt-next | **22.45 s** | -22.7% | 2397 MiB | +1.7% | 2026-06-10 |
+| 2 | baseline | **29.05 s** | baseline | 2356 MiB | baseline | 2026-06-10 |
 
 ## Memory board (ranked by peak RSS)
 
 | # | prover | peak RSS | vs baseline | prove time | vs baseline | date |
 |---|--------|------|------|------|------|------|
-| 1 | baseline | **2587 MiB** | baseline | 35.43 s | baseline | 2026-06-10 |
+| 1 | baseline | **2356 MiB** | baseline | 29.05 s | baseline | 2026-06-10 |
+| 2 | opt-next | **2397 MiB** | +1.7% | 22.45 s | -22.7% | 2026-06-10 |
 
 _Numbers are comparable only when graded on the same machine — the canonical boards above are produced on the maintainer's grader (Apple M-series arm64, macOS). To get on the board: see "Submitting" in the README._

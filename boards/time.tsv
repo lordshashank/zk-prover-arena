@@ -1,2 +1,4 @@
 iso	stack	task	median_prove_s	peak_rss_MiB	verified	valid	note
 2026-06-10T04:14:34.685Z	baseline	hard2pow21-v2	35.43	2587	1	1	
+2026-06-10T04:44:02.431Z	baseline	hard2pow21-v2	29.05	2356	1	1	
+2026-06-10T04:45:17.567Z	opt-next	hard2pow21-v2	22.45	2397	1	1	
