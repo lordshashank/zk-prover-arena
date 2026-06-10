@@ -25,7 +25,7 @@ export BB_SPARSE="barretenberg/cpp"
 export CCACHE_DIR="$HOME/.ccache" CCACHE_MAXSIZE=4G
 export CMAKE_C_COMPILER_LAUNCHER=ccache CMAKE_CXX_COMPILER_LAUNCHER=ccache
 export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-4}"
-export BB_CMAKE_ARGS="${BB_CMAKE_ARGS:--DBB_LITE=ON}"   # match ci/setup.sh's baseline build
+export COREPACK_ENABLE_DOWNLOAD_PROMPT=0   # candidate configures run the nodejs_module yarn probe
 export ZKARENA_MACHINE="${ZKARENA_MACHINE:-github/ubuntu-24.04-arm (Azure Cobalt 100, 4 vCPU, 16GiB)}"
 
 OUT="$ARENA_DIR/ci-out"

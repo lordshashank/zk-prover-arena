@@ -27,10 +27,23 @@ echo "== apt packages =="
 sudo apt-get update -qq
 sudo apt-get install -y -qq time ninja-build ccache jq >/dev/null
 
+# bb's cmake configure probes node/yarn for the nodejs_module subproject (a tiny
+# self-contained yarn-4 package). corepack makes `yarn` resolve to the version pinned
+# in its package.json. (BB_LITE would skip this entirely but cannot link `bb` at the
+# pinned commit: api_msgpack.cpp references ipc unconditionally on non-WASM.)
+export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+sudo env "PATH=$PATH" corepack enable || corepack enable
+yarn --version || true
+
 echo "== clang-$LLVM_MAJOR (apt.llvm.org) =="
 if ! command -v clang-$LLVM_MAJOR >/dev/null; then
-  wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
-  sudo bash /tmp/llvm.sh $LLVM_MAJOR >/dev/null
+  # Explicit repo lines instead of llvm.sh — the script can hang on prompts in
+  # non-interactive environments, and pinning the suite is more deterministic anyway.
+  CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
+  wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/llvm.gpg
+  echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/$CODENAME/ llvm-toolchain-$CODENAME-$LLVM_MAJOR main" | sudo tee /etc/apt/sources.list.d/llvm.list >/dev/null
+  sudo apt-get update -qq
+  sudo apt-get install -y -qq clang-$LLVM_MAJOR >/dev/null
 fi
 # bb's `default` preset expects plain `clang`/`clang++` on PATH.
 sudo ln -sf "$(command -v clang-$LLVM_MAJOR)" /usr/local/bin/clang
@@ -62,12 +75,9 @@ export CCACHE_DIR="$HOME/.ccache" CCACHE_MAXSIZE=4G
 export CMAKE_C_COMPILER_LAUNCHER=ccache CMAKE_CXX_COMPILER_LAUNCHER=ccache
 export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-4}"
 if [ ! -x "$HOME/bb-baseline/bb" ]; then
-  echo "cache miss — building baseline from pristine ${BASE_COMMIT:0:10} (cold: ~40-70 min on 4 vCPU)"
+  echo "cache miss — building baseline from pristine ${BASE_COMMIT:0:10} (cold: ~15-40 min on 4 vCPU)"
   cd "$BB_REPO/barretenberg/cpp"
-  # BB_LITE: client-side bb (no lmdb/world_state/ipc/nodejs_module) — drops the yarn/node-api
-  # configure deps and builds less; prove/verify/write_vk are unaffected. Candidates are
-  # built with the same flag (ci/grade.sh exports BB_CMAKE_ARGS), so the comparison is fair.
-  cmake --preset default -DBB_LITE=ON >/dev/null
+  cmake --preset default >/dev/null
   # Stream sampled progress lines for liveness; keep the full log and dump its tail on
   # failure (linker diagnostics like "undefined reference" don't match progress patterns).
   set +e

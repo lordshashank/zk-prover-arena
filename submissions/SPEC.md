@@ -77,7 +77,7 @@ Official numbers are produced **only** by the [`official-grade`](../.github/work
 | | |
 |---|---|
 | hardware | Azure Cobalt 100 (Arm Neoverse N2), 4 vCPU, 16 GiB — one homogeneous fleet |
-| OS / toolchain | ubuntu-24.04, clang-20 (apt.llvm.org), cmake preset `default` + `-DBB_LITE=ON` |
+| OS / toolchain | ubuntu-24.04, clang-20 (apt.llvm.org), cmake preset `default` |
 | provisioning | [`ci/setup.sh`](../ci/setup.sh) — the executable definition of the environment |
 | fingerprint | every grade records its machine label (boards transcripts + `log.jsonl`) |
 
