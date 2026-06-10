@@ -1,0 +1,71 @@
+# zk-prover-arena — ADVISORY intake checks on submission PRs.
+#
+# Validates every submission directory a PR adds/changes: manifest schema, patch
+# path policy, claimed-score pre-filter, and `git apply --check` against the pinned
+# base. Mechanical only — the patch is never compiled or executed here, so this can
+# safely run automatically on fork PRs. Passing intake does NOT grade or rank
+# anything: official numbers come from a maintainer dispatching the
+# `official-grade` workflow (mode=submission) on the canonical runner.
+#
+# Caveat for reviewers: this runs the intake script from the PR's own checkout, so
+# a green check here is a convenience signal, not a security boundary — the
+# official-grade workflow re-runs intake from `main`'s scripts before any build.
+name: submission-intake
+
+on:
+  pull_request:
+    paths:
+      - "submissions/incoming/**"
+
+permissions:
+  contents: read
+
+jobs:
+  intake:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Clone pinned bb base (sparse, for apply-check)
+        run: |
+          BASE_COMMIT=$(sed -n "s/^export const BASE_COMMIT = '\([0-9a-f]\{40\}\)';$/\1/p" intake.mjs)
+          git init -q "$HOME/aztec-packages"
+          git -C "$HOME/aztec-packages" remote add origin https://github.com/AztecProtocol/aztec-packages.git
+          git -C "$HOME/aztec-packages" config remote.origin.promisor true
+          git -C "$HOME/aztec-packages" config remote.origin.partialclonefilter blob:none
+          git -C "$HOME/aztec-packages" fetch -q --depth 1 --filter=blob:none origin "$BASE_COMMIT"
+          git -C "$HOME/aztec-packages" sparse-checkout set --cone barretenberg/cpp
+          git -C "$HOME/aztec-packages" checkout -q --detach "$BASE_COMMIT"
+
+      - name: Intake checks on changed submissions
+        shell: bash
+        env:
+          BB_REPO: /home/runner/aztec-packages
+          BB_SPARSE: barretenberg/cpp
+        run: |
+          set +e
+          DIRS=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD" -- 'submissions/incoming/**' \
+                 | cut -d/ -f1-3 | sort -u)
+          [ -n "$DIRS" ] || { echo "no submission dirs changed"; exit 0; }
+          rc=0
+          for d in $DIRS; do
+            [ -d "$d" ] || { echo "skipping deleted dir $d"; continue; }
+            echo "### Intake: \`$d\`" >> "$GITHUB_STEP_SUMMARY"
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"
+            if node intake.mjs "$d" | tee -a "$GITHUB_STEP_SUMMARY"; then
+              echo "intake OK: $d"
+            else
+              rc=1
+            fi
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+          done
+          {
+            echo ""
+            echo "> Intake is mechanical validation only. Official grading happens on the"
+            echo "> canonical runner when a maintainer dispatches \`official-grade\` for this PR."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit $rc

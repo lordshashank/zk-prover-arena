@@ -34,7 +34,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync, existsSync, appendFileSync, mkdirSync, rmSync, writeFileSync, cpSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { homedir, tmpdir } from 'node:os';
+import { homedir, tmpdir, cpus, totalmem } from 'node:os';
 import { randomBytes } from 'node:crypto';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -49,6 +49,10 @@ const manifest = JSON.parse(readFileSync(resolve(__dirname, 'problem', 'manifest
 const BUDGET = manifest.validity.budgets;
 const BASELINE_BB = process.env.BASELINE_BB || resolve(homedir(), '.bb-next', 'bb');
 const NARGO = process.env.NARGO_BIN || resolve(homedir(), '.nargo', 'bin', 'nargo');
+// Machine fingerprint: scores are only comparable within one environment, so every
+// result records where it was measured. CI sets ZKARENA_MACHINE to the official label.
+const MACHINE = process.env.ZKARENA_MACHINE
+  || `${cpus()[0]?.model?.trim() || 'unknown-cpu'} | ${process.platform}-${process.arch} | ${Math.round(totalmem() / 2 ** 30)}GiB`;
 
 let candidateBB = args.bb;
 if (!candidateBB) {
@@ -150,6 +154,7 @@ const median = (xs) => { const s = [...xs].sort((a, b) => a - b); const m = s.le
 
 console.log(`\n=== zk-prover-arena :: grading "${stackName}" on task "${manifest.name}" (2^${Math.log2(manifest.paddedSize)}) ===`);
 console.log(`candidate bb: ${candidateBB}`);
+console.log(`machine: ${MACHINE}`);
 console.log(`fresh witness per run: ${haveNargo ? 'yes (nargo)' : 'NO — pinned-witness fallback, output gate skipped'}`);
 console.log(`budgets: time board needs peakRSS<=${BUDGET.timeBoardMemBudgetMiB}MiB; memory board needs time<=${BUDGET.memoryBoardTimeBudgetS}s; diskOps<=${BUDGET.maxBlockOutputOps}; runs=${runs}\n`);
 
@@ -197,7 +202,7 @@ console.log(`  appended to boards/ — \`node board.mjs --md\` refreshes LEADERB
 
 if (args.json) {
   writeFileSync(resolve(args.json), JSON.stringify({
-    iso, task: manifest.name, stack: stackName, bb: candidateBB, runsRequested: runs,
+    iso, task: manifest.name, stack: stackName, bb: candidateBB, machine: MACHINE, runsRequested: runs,
     medianS: medS, peakMiB: peakMiB != null ? +peakMiB.toFixed(0) : null, maxDiskOps: maxDisk,
     runs: runDetails,
     gates: { soundness: allVerified, freshOutput: allOutputs && anyFresh, singleThread: !threadViolation, disk: diskOk, complete: ok },

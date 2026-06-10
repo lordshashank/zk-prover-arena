@@ -118,14 +118,27 @@ export function checkClaims(sub, bests) {
 }
 
 // ---- 4. scratch worktree of the pinned base + git apply --check ----
+// BB_SPARSE (colon-separated dirs, e.g. "barretenberg/cpp") restricts the checkout to
+// the named trees — used on CI where BB_REPO is a blob-filtered clone and a full
+// monorepo checkout would waste minutes and gigabytes. Unset = full checkout (local).
 export function addScratchWorktree(label) {
   if (!existsSync(BB_REPO)) throw new Reject(`BB_REPO not found: ${BB_REPO} (set BB_REPO env)`);
   const probe = spawnSync('git', ['-C', BB_REPO, 'cat-file', '-e', `${BASE_COMMIT}^{commit}`], { encoding: 'utf8' });
   if (probe.status !== 0) throw new Reject(`pinned base ${BASE_COMMIT.slice(0, 10)} not present in ${BB_REPO} — fetch upstream next`);
   const wt = join(tmpdir(), `zkarena-${label}-${process.pid}-${Date.now()}`);
-  log(`creating scratch worktree of ${BASE_COMMIT.slice(0, 10)} at ${wt} (large checkout, ~1min)...`);
-  const r = spawnSync('git', ['-C', BB_REPO, 'worktree', 'add', '--detach', wt, BASE_COMMIT], { encoding: 'utf8' });
-  if (r.status !== 0) { removeScratchWorktree(wt); throw new Error(`git worktree add failed: ${(r.stderr || '').slice(-400)}`); }
+  const sparse = (process.env.BB_SPARSE || '').split(':').filter(Boolean);
+  log(`creating scratch worktree of ${BASE_COMMIT.slice(0, 10)} at ${wt}${sparse.length ? ` (sparse: ${sparse.join(', ')})` : ' (large checkout, ~1min)'}...`);
+  const steps = sparse.length
+    ? [
+        ['-C', BB_REPO, 'worktree', 'add', '--no-checkout', '--detach', wt, BASE_COMMIT],
+        ['-C', wt, 'sparse-checkout', 'set', '--cone', ...sparse],
+        ['-C', wt, 'checkout', '--detach', BASE_COMMIT],
+      ]
+    : [['-C', BB_REPO, 'worktree', 'add', '--detach', wt, BASE_COMMIT]];
+  for (const argv of steps) {
+    const r = spawnSync('git', argv, { encoding: 'utf8' });
+    if (r.status !== 0) { removeScratchWorktree(wt); throw new Error(`git ${argv.slice(2).join(' ')} failed: ${(r.stderr || '').slice(-400)}`); }
+  }
   return wt;
 }
 

@@ -42,7 +42,7 @@ const DRY = 'dry-run' in args;
 const RUNS = args.runs ? parseInt(args.runs) : 5;
 const RUN_TIMEOUT_S = args['run-timeout'] ? parseInt(args['run-timeout']) : 600; // per graded run
 const BUILD_TIMEOUT_S = 3600;
-const PRESET = process.env.BB_BUILD_PRESET || 'homebrew';
+const PRESET = process.env.BB_BUILD_PRESET || (process.platform === 'darwin' ? 'homebrew' : 'default');
 const BREW_PREFIX = process.env.BREW_PREFIX || '/opt/homebrew';
 const TIME_MARGIN_FLOOR_S = 0.5;
 const MEM_MARGIN_MIB = 75;
@@ -198,7 +198,7 @@ async function promote(dir) {
       ts, name: sub.name, author: sub.author, model: sub.model,
       claimed: { timeS: sub.claimedTimeS, peakMiB: sub.claimedPeakMiB },
       official: { timeS: res.medianS, peakMiB: res.peakMiB, timeWin, memWin },
-      sigma: +sigma.toFixed(3), baseCommit: BASE_COMMIT, gradeTranscriptPath: transcriptRel,
+      sigma: +sigma.toFixed(3), baseCommit: BASE_COMMIT, machine: res.machine ?? null, gradeTranscriptPath: transcriptRel,
     };
     appendFileSync(resolve(__dirname, 'submissions', 'log.jsonl'), JSON.stringify(logRow) + '\n');
     spawnSync(process.execPath, [resolve(__dirname, 'board.mjs'), '--md'], { encoding: 'utf8' });

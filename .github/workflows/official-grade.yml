@@ -1,0 +1,120 @@
+# zk-prover-arena — OFFICIAL grading on the canonical environment.
+#
+# Canonical environment = GitHub-hosted `ubuntu-24.04-arm` (Azure Cobalt 100 /
+# Neoverse N2, 4 vCPU, 16 GiB): a homogeneous, free, publicly reproducible fleet —
+# every official score on the boards is measured here, never on anyone's laptop.
+#
+# Trust model: only maintainers can dispatch this workflow, and every script it
+# executes (grade.mjs / promote.mjs / ci/*) comes from `main`. When grading a PR
+# submission, ONLY the submission directory (patch + manifest = data, not code) is
+# taken from the PR head. The patch itself is built and run, of course — that is
+# the point — but inside this throwaway runner with a read-limited token.
+name: official-grade
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: what to grade
+        type: choice
+        options: [submission, calibrate, baseline, regrade-champion]
+        default: submission
+      submission:
+        description: submission name under submissions/incoming/ (submission mode)
+        type: string
+        required: false
+      pr:
+        description: PR number to fetch the submission dir from (optional; omit if already on main)
+        type: string
+        required: false
+      runs:
+        description: graded runs (median/sigma)
+        type: string
+        default: "5"
+
+concurrency:
+  group: official-grade   # serialize: benchmark isolation + no board-push races
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  grade:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Fetch submission dir from PR (data only — scripts stay from main)
+        if: inputs.mode == 'submission' && inputs.pr != ''
+        run: |
+          git fetch origin "pull/${{ inputs.pr }}/head:prhead"
+          git checkout prhead -- "submissions/incoming/${{ inputs.submission }}"
+          ls -la "submissions/incoming/${{ inputs.submission }}"
+
+      - name: Resolve cache keys
+        id: keys
+        run: |
+          echo "base=$(sed -n "s/^export const BASE_COMMIT = '\([0-9a-f]\{40\}\)';$/\1/p" intake.mjs)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore baseline bb
+        uses: actions/cache@v4
+        with:
+          path: ~/bb-baseline
+          key: bb-baseline-${{ steps.keys.outputs.base }}-${{ runner.arch }}-clang20-v1
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ runner.arch }}-clang20-${{ steps.keys.outputs.base }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-${{ runner.arch }}-clang20-${{ steps.keys.outputs.base }}-
+            ccache-${{ runner.arch }}-clang20-
+
+      - name: Provision environment (toolchain, nargo, bb base, baseline build)
+        run: bash ci/setup.sh
+
+      - name: Grade
+        id: grade
+        run: |
+          git config user.name "zk-arena-bot"
+          git config user.email "zk-arena-bot@users.noreply.github.com"
+          bash ci/grade.sh "${{ inputs.mode }}" "${{ inputs.submission || inputs.runs }}" "${{ inputs.runs }}"
+
+      - name: Push results
+        if: always() && (inputs.mode == 'submission' || inputs.mode == 'baseline' || inputs.mode == 'regrade-champion')
+        shell: bash
+        run: |
+          if [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ]; then
+            echo "no new commit to push"; exit 0
+          fi
+          ok=0
+          for i in 1 2 3; do
+            if git pull --rebase origin main && git push origin HEAD:main; then ok=1; break; fi
+            sleep 5
+          done
+          [ "$ok" = 1 ]
+
+      - name: Comment verdict on PR
+        if: always() && inputs.mode == 'submission' && inputs.pr != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          BODY=$(printf 'Official grading result (`%s`, canonical environment `ubuntu-24.04-arm`):\n\n```json\n%s\n```\n\nRun: %s\n' \
+            "${{ inputs.submission }}" "$(cat ci-out/verdict.json 2>/dev/null || echo '{"status":"error","reason":"no verdict produced — see run log"}')" \
+            "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}")
+          gh pr comment "${{ inputs.pr }}" --body "$BODY"
+
+      - name: Upload run artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: grade-${{ inputs.mode }}-${{ github.run_id }}
+          path: ci-out/
+          if-no-files-found: ignore
