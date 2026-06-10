@@ -70,18 +70,18 @@ Before any compute is spent, your **claims** are compared against the current be
 
 This is deliberately lenient (a claim that merely *ties* a board passes intake — but a tie cannot pass the noise-margin acceptance rule below, so don't bother). The pre-filter exists to stop the canonical machine from burning a ~15-minute build+grade on submissions that don't even claim an improvement. Lying in your claims doesn't help: official numbers are re-measured from scratch, and a submission whose official numbers miss the margin is rejected regardless of what it claimed.
 
-## The canonical environment
+## The canonical environments (dual boards)
 
-Official numbers are produced **only** by the [`official-grade`](../.github/workflows/official-grade.yml) workflow, dispatched by a maintainer, on GitHub-hosted **`ubuntu-24.04-arm`** runners:
+Official numbers are produced **only** by the [`official-grade`](../.github/workflows/official-grade.yml) workflow, dispatched by a maintainer. Every submission is graded on **two** environments in parallel:
 
-| | |
-|---|---|
-| hardware | Azure Cobalt 100 (Arm Neoverse N2), 4 vCPU, 16 GiB — one homogeneous fleet |
-| OS / toolchain | ubuntu-24.04, clang-20 (apt.llvm.org), cmake preset `default` |
-| provisioning | [`ci/setup.sh`](../ci/setup.sh) — the executable definition of the environment |
-| fingerprint | every grade records its machine label (boards transcripts + `log.jsonl`) |
+| | arm64 board (canonical) | x86 board (Aztec's perf ISA) |
+|---|---|---|
+| runner | `ubuntu-24.04-arm` — Azure Cobalt 100 (Neoverse N2), 4 vCPU | `ubuntu-latest` — mixed fleet (AMD EPYC / Intel Xeon), 4 vCPU |
+| time scoring | **absolute seconds** (homogeneous fleet — cross-run comparable) | **ratio to a baseline graded in the same job on the same VM** (cancels the CPU lottery) |
+| memory scoring | absolute peak RSS (MiB) | absolute peak RSS (MiB) — RSS is hardware-insensitive |
+| why it exists | consistent ranking fleet | upstream barretenberg's first-class perf target (`-march=skylake`, x64 asm active) — wins here translate to Aztec |
 
-Baseline and candidates are built with the identical preset/flags, and graded back-to-back on the same fleet, so deltas are attributable to the patch. Your local numbers (any OS/CPU) select what to submit; they never rank.
+Common to both: ubuntu-24.04(+), clang-20 (apt.llvm.org), cmake preset `default`, single-thread, provisioned by [`ci/setup.sh`](../ci/setup.sh). **Every board row records the machine it was measured on** (on x86 that's the CPU model the VM landed on — e.g. `gh-x64/EPYC-7763`). Baseline and candidates are built with identical preset/flags, so deltas are attributable to the patch. Your local numbers (any OS/CPU) select what to submit; they never rank.
 
 ## Official grading & the acceptance rule (noise margin)
 
@@ -91,14 +91,16 @@ Wall-clock is noisy, so acceptance is **margin-based**, not "any epsilon wins". 
 2. builds your patched `bb` from source (the standard release preset for the platform — same as the baseline build),
 3. runs `node grade.mjs --runs=5` with all the validity gates from the README (fresh witness, baseline verify, single-thread, disk cap, cross-budgets),
 4. computes **sigma** = the *sample standard deviation of the 5 prove times within this grading run* (run-to-run noise, measured fresh every time rather than assumed),
-5. applies the **acceptance rule** — the submission is accepted iff at least one of:
+5. applies the **acceptance rule** (`ci/decide.mjs`) — the submission is accepted iff it wins **any** of the four boards beyond its noise margin:
 
 ```
-TIME WIN   : time-board row is VALID  and  officialMedianS  <  bestTimeS   − max(0.5 s, 2·sigma)
-MEMORY WIN : memory-board row is VALID and  officialPeakMiB  <  bestPeakMiB − 75 MiB
+arm64 TIME  : time row VALID  and  medianS  <  bestTimeS   − max(0.5 s, 2·σ)
+arm64 MEM   : mem row VALID   and  peakMiB  <  bestPeakMiB − 75 MiB
+x86  TIME   : time row VALID  and  ratio    <  bestRatio   − max(0.015, 2·σ_ratio)
+x86  MEM    : mem row VALID   and  peakMiB  <  bestPeakMiB − 75 MiB
 ```
 
-where `bestTimeS` / `bestPeakMiB` are the best valid rows on the boards *before* this grading. The `max(0.5 s, 2·sigma)` floor means: on a quiet machine you must beat the champion by at least 0.5 s; on a noisy day the bar rises with the measured noise. Peak RSS is far less noisy, so its margin is a flat 75 MiB.
+where the bests are the best valid rows on each board *before* this grading (x86 baseline anchor rows don't compete), `ratio = candidateMedian / sameVmBaselineMedian`, and `σ_ratio` combines both runs' sigmas in quadrature. x86 validity uses the same cross-budget semantics expressed relative to the same-VM baseline: time rows need peak RSS ≤ 4096 MiB, memory rows need ratio ≤ 2.0. The floors mean: on a quiet machine you must beat the champion by at least 0.5 s (arm64) / 1.5% (x86); on a noisy day the bar rises with the measured noise. Peak RSS is far less noisy, so its margin is a flat 75 MiB. A grading environment that fails outright (build error, infra) contributes no win but doesn't block the other.
 
 A submission that is *graded but misses the margin* is rejected and **its rows never enter the canonical boards** (the grader writes to an isolated boards dir; rows are copied into `boards/*.tsv` only on acceptance). The boards therefore only ever contain: the maintainer's reference runs, and accepted submissions.
 

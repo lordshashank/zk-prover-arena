@@ -194,10 +194,10 @@ function append(file, header, row) {
   if (!existsSync(p)) appendFileSync(p, header.join('\t') + '\n');
   appendFileSync(p, row.join('\t') + '\n');
 }
-append('time.tsv', ['iso', 'stack', 'task', 'median_prove_s', 'peak_rss_MiB', 'verified', 'valid', 'note'],
-  [iso, stackName, manifest.name, medS ?? '', peakMiB != null ? peakMiB.toFixed(0) : '', allVerified ? 1 : 0, timeBoardValid ? 1 : 0, note]);
-append('memory.tsv', ['iso', 'stack', 'task', 'peak_rss_MiB', 'median_prove_s', 'verified', 'valid', 'note'],
-  [iso, stackName, manifest.name, peakMiB != null ? peakMiB.toFixed(0) : '', medS ?? '', allVerified ? 1 : 0, memBoardValid ? 1 : 0, note]);
+append('time.tsv', ['iso', 'stack', 'task', 'median_prove_s', 'peak_rss_MiB', 'verified', 'valid', 'note', 'machine'],
+  [iso, stackName, manifest.name, medS ?? '', peakMiB != null ? peakMiB.toFixed(0) : '', allVerified ? 1 : 0, timeBoardValid ? 1 : 0, note, MACHINE]);
+append('memory.tsv', ['iso', 'stack', 'task', 'peak_rss_MiB', 'median_prove_s', 'verified', 'valid', 'note', 'machine'],
+  [iso, stackName, manifest.name, peakMiB != null ? peakMiB.toFixed(0) : '', medS ?? '', allVerified ? 1 : 0, memBoardValid ? 1 : 0, note, MACHINE]);
 console.log(`  appended to boards/ — \`node board.mjs --md\` refreshes LEADERBOARD.md\n`);
 
 if (args.json) {

@@ -1,14 +1,21 @@
-# zk-prover-arena — OFFICIAL grading on the canonical environment.
+# zk-prover-arena — OFFICIAL grading on the canonical environments.
 #
-# Canonical environment = GitHub-hosted `ubuntu-24.04-arm` (Azure Cobalt 100 /
-# Neoverse N2, 4 vCPU, 16 GiB): a homogeneous, free, publicly reproducible fleet —
-# every official score on the boards is measured here, never on anyone's laptop.
+# Two boards, two environments (see LEADERBOARD.md):
+#   arm64 (canonical): ubuntu-24.04-arm — Azure Cobalt 100, homogeneous fleet,
+#         absolute seconds are comparable across runs
+#   x86   (Aztec's perf ISA): ubuntu-latest — mixed EPYC/Xeon fleet, so submissions
+#         are scored as a RATIO to a baseline graded in the same job on the same VM
 #
-# Trust model: only maintainers can dispatch this workflow, and every script it
-# executes (grade.mjs / promote.mjs / ci/*) comes from `main`. When grading a PR
-# submission, ONLY the submission directory (patch + manifest = data, not code) is
-# taken from the PR head. The patch itself is built and run, of course — that is
-# the point — but inside this throwaway runner with a read-limited token.
+# mode=submission grades on BOTH in parallel, then a decide job applies the
+# acceptance rule (win any board beyond its noise margin) and makes the bot commit.
+# Other modes (calibrate/baseline/regrade-champion) run on the arm64 canonical
+# environment only.
+#
+# Trust model: only maintainers can dispatch, and every script executed comes from
+# `main` — when grading a PR submission, ONLY the submission directory (patch +
+# manifest = data, not code) is taken from the PR head. The patch itself is built
+# and run, of course — that is the point — inside throwaway runners with a
+# read-limited token.
 name: official-grade
 
 on:
@@ -33,7 +40,7 @@ on:
         default: "5"
 
 concurrency:
-  group: official-grade   # serialize: benchmark isolation + no board-push races
+  group: official-grade   # serialize runs: no board-push races
   cancel-in-progress: false
 
 permissions:
@@ -41,7 +48,9 @@ permissions:
   pull-requests: write
 
 jobs:
+  # ---- calibrate / baseline / regrade-champion: arm64 canonical only ----
   grade:
+    if: inputs.mode != 'submission'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 330
     steps:
@@ -49,52 +58,33 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
-
-      - name: Fetch submission dir from PR (data only — scripts stay from main)
-        if: inputs.mode == 'submission' && inputs.pr != ''
-        run: |
-          git fetch origin "pull/${{ inputs.pr }}/head:prhead"
-          git checkout prhead -- "submissions/incoming/${{ inputs.submission }}"
-          ls -la "submissions/incoming/${{ inputs.submission }}"
-
       - name: Resolve cache keys
         id: keys
-        run: |
-          echo "base=$(sed -n "s/^export const BASE_COMMIT = '\([0-9a-f]\{40\}\)';$/\1/p" intake.mjs)" >> "$GITHUB_OUTPUT"
-
-      - name: Restore baseline bb
-        uses: actions/cache@v4
+        run: echo "base=$(sed -n "s/^export const BASE_COMMIT = '\([0-9a-f]\{40\}\)';$/\1/p" intake.mjs)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
         with:
           path: ~/bb-baseline
           key: bb-baseline-${{ steps.keys.outputs.base }}-${{ runner.arch }}-clang20-v1
-
-      - name: Restore ccache
-        uses: actions/cache@v4
+      - uses: actions/cache@v4
         with:
           path: ~/.ccache
           key: ccache-${{ runner.arch }}-clang20-${{ steps.keys.outputs.base }}-${{ github.run_id }}
           restore-keys: |
             ccache-${{ runner.arch }}-clang20-${{ steps.keys.outputs.base }}-
             ccache-${{ runner.arch }}-clang20-
-
-      - name: Restore CRS (SRS points; downloaded once, ~140MB)
-        uses: actions/cache@v4
+      - uses: actions/cache@v4
         with:
           path: ~/.bb-crs
           key: bb-crs-2pow21-v1
-
-      - name: Provision environment (toolchain, nargo, bb base, baseline build)
+      - name: Provision environment
         run: bash ci/setup.sh
-
       - name: Grade
-        id: grade
         run: |
           git config user.name "zk-arena-bot"
           git config user.email "zk-arena-bot@users.noreply.github.com"
-          bash ci/grade.sh "${{ inputs.mode }}" "${{ inputs.submission || inputs.runs }}" "${{ inputs.runs }}"
-
+          bash ci/grade.sh "${{ inputs.mode }}" "${{ inputs.runs }}"
       - name: Push results
-        if: always() && (inputs.mode == 'submission' || inputs.mode == 'baseline' || inputs.mode == 'regrade-champion')
+        if: always() && (inputs.mode == 'baseline' || inputs.mode == 'regrade-champion')
         shell: bash
         run: |
           if [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ]; then
@@ -106,21 +96,160 @@ jobs:
             sleep 5
           done
           [ "$ok" = 1 ]
-
-      - name: Comment verdict on PR
-        if: always() && inputs.mode == 'submission' && inputs.pr != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          BODY=$(printf 'Official grading result (`%s`, canonical environment `ubuntu-24.04-arm`):\n\n```json\n%s\n```\n\nRun: %s\n' \
-            "${{ inputs.submission }}" "$(cat ci-out/verdict.json 2>/dev/null || echo '{"status":"error","reason":"no verdict produced — see run log"}')" \
-            "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}")
-          gh pr comment "${{ inputs.pr }}" --body "$BODY"
-
       - name: Upload run artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: grade-${{ inputs.mode }}-${{ github.run_id }}
+          path: ci-out/
+          if-no-files-found: ignore
+
+  # ---- submission mode: grade on both environments in parallel ----
+  grade-arm64:
+    if: inputs.mode == 'submission'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Fetch submission dir from PR (data only — scripts stay from main)
+        if: inputs.pr != ''
+        run: |
+          git fetch origin "pull/${{ inputs.pr }}/head:prhead"
+          git checkout prhead -- "submissions/incoming/${{ inputs.submission }}"
+      - name: Resolve cache keys
+        id: keys
+        run: echo "base=$(sed -n "s/^export const BASE_COMMIT = '\([0-9a-f]\{40\}\)';$/\1/p" intake.mjs)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: ~/bb-baseline
+          key: bb-baseline-${{ steps.keys.outputs.base }}-${{ runner.arch }}-clang20-v1
+      - uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ runner.arch }}-clang20-${{ steps.keys.outputs.base }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-${{ runner.arch }}-clang20-${{ steps.keys.outputs.base }}-
+            ccache-${{ runner.arch }}-clang20-
+      - uses: actions/cache@v4
+        with:
+          path: ~/.bb-crs
+          key: bb-crs-2pow21-v1
+      - name: Provision environment
+        run: bash ci/setup.sh
+      - name: Grade (arm64, no decision)
+        run: bash ci/grade.sh submission-grade-only "${{ inputs.submission }}" "${{ inputs.runs }}"
+      - name: Upload grading artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: arm64-grade
+          path: ci-out/
+          if-no-files-found: ignore
+
+  grade-x86:
+    if: inputs.mode == 'submission'
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Fetch submission dir from PR (data only — scripts stay from main)
+        if: inputs.pr != ''
+        run: |
+          git fetch origin "pull/${{ inputs.pr }}/head:prhead"
+          git checkout prhead -- "submissions/incoming/${{ inputs.submission }}"
+      - name: Resolve cache keys
+        id: keys
+        run: echo "base=$(sed -n "s/^export const BASE_COMMIT = '\([0-9a-f]\{40\}\)';$/\1/p" intake.mjs)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: ~/bb-baseline
+          key: bb-baseline-${{ steps.keys.outputs.base }}-${{ runner.arch }}-clang20-v1
+      - uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ runner.arch }}-clang20-${{ steps.keys.outputs.base }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-${{ runner.arch }}-clang20-${{ steps.keys.outputs.base }}-
+            ccache-${{ runner.arch }}-clang20-
+      - uses: actions/cache@v4
+        with:
+          path: ~/.bb-crs
+          key: bb-crs-2pow21-v1
+      - name: Provision environment
+        run: bash ci/setup.sh
+      - name: Grade (x86, baseline + candidate on this VM)
+        run: bash ci/grade.sh x86-submission "${{ inputs.submission }}" "${{ inputs.runs }}"
+      - name: Upload grading artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: x86-grade
+          path: ci-out/
+          if-no-files-found: ignore
+
+  decide:
+    if: always() && inputs.mode == 'submission'
+    needs: [grade-arm64, grade-x86]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Fetch submission dir from PR (data only — scripts stay from main)
+        if: inputs.pr != ''
+        run: |
+          git fetch origin "pull/${{ inputs.pr }}/head:prhead"
+          git checkout prhead -- "submissions/incoming/${{ inputs.submission }}"
+      - name: Download arm64 grading
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: arm64-grade
+          path: ci-in/arm64-grade
+      - name: Download x86 grading
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: x86-grade
+          path: ci-in/x86-grade
+      - name: Decide + bot commit
+        id: decide
+        run: |
+          git config user.name "zk-arena-bot"
+          git config user.email "zk-arena-bot@users.noreply.github.com"
+          bash ci/grade.sh decide "${{ inputs.submission }}"
+      - name: Push results
+        if: always()
+        shell: bash
+        run: |
+          if [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ]; then
+            echo "no new commit to push"; exit 0
+          fi
+          ok=0
+          for i in 1 2 3; do
+            if git pull --rebase origin main && git push origin HEAD:main; then ok=1; break; fi
+            sleep 5
+          done
+          [ "$ok" = 1 ]
+      - name: Comment verdict on PR
+        if: always() && inputs.pr != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          BODY=$(printf 'Official grading result (`%s`, dual environments arm64+x86):\n\n```json\n%s\n```\n\nRun: %s\n' \
+            "${{ inputs.submission }}" "$(cat ci-out/verdict.json 2>/dev/null || echo '{"status":"error","reason":"no verdict produced — see run log"}')" \
+            "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}")
+          gh pr comment "${{ inputs.pr }}" --body "$BODY"
+      - name: Upload decision artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: decision-${{ github.run_id }}
           path: ci-out/
           if-no-files-found: ignore

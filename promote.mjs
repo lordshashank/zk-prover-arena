@@ -174,6 +174,14 @@ async function promote(dir) {
     const margins = { timeS: +timeMargin.toFixed(3), memMiB: MEM_MARGIN_MIB, sigmaS: +sigma.toFixed(3) };
     log(`official ${res.medianS}s/${res.peakMiB}MiB  sigma=${sigma.toFixed(3)}s  need < ${isFinite(bestT) ? (bestT - timeMargin).toFixed(2) : 'any'}s or < ${isFinite(bestM) ? (bestM - MEM_MARGIN_MIB).toFixed(0) : 'any'}MiB  -> timeWin=${timeWin} memWin=${memWin}`);
 
+    // --grade-only: emit measurements + transcript and stop — acceptance and the bot
+    // commit belong to a separate decider (ci/decide.mjs combines multiple environments).
+    if ('grade-only' in args) {
+      if (args['grade-out']) writeFileSync(resolve(args['grade-out']), JSON.stringify({ ...res, sigma: +sigma.toFixed(3) }, null, 2) + '\n');
+      if (args['transcript-out']) writeFileSync(resolve(args['transcript-out']), g.out);
+      return { verdict: { status: 'graded', name: sub.name, official, sigma: +sigma.toFixed(3), margins, baseCommit: BASE_COMMIT, machine: res.machine ?? null }, code: 0 };
+    }
+
     if (!res.gates.complete || !res.gates.soundness || !res.gates.freshOutput || !res.gates.singleThread || !res.gates.disk) {
       return { verdict: { status: 'rejected', reason: 'gates', official, detail: res.error || 'one or more validity gates failed — see transcript on stderr' }, code: 1 };
     }
