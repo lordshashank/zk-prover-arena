@@ -64,7 +64,10 @@ export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-4}"
 if [ ! -x "$HOME/bb-baseline/bb" ]; then
   echo "cache miss — building baseline from pristine ${BASE_COMMIT:0:10} (cold: ~40-70 min on 4 vCPU)"
   cd "$BB_REPO/barretenberg/cpp"
-  cmake --preset default >/dev/null
+  # BB_LITE: client-side bb (no lmdb/world_state/ipc/nodejs_module) — drops the yarn/node-api
+  # configure deps and builds less; prove/verify/write_vk are unaffected. Candidates are
+  # built with the same flag (ci/grade.sh exports BB_CMAKE_ARGS), so the comparison is fair.
+  cmake --preset default -DBB_LITE=ON >/dev/null
   # Stream sampled progress lines so the job log shows life during the long build.
   cmake --build --preset default --target bb 2>&1 | grep --line-buffered -E '^\[[0-9]+/[0-9]+\]|error|Error|FAILED|Linking' | sed -n '1~50p;/error\|Error\|FAILED\|Linking/p'
   mkdir -p "$HOME/bb-baseline"

@@ -142,7 +142,8 @@ async function promote(dir) {
     // 3. configure + build (streamed; fail-closed)
     const cpp = join(wt, 'barretenberg', 'cpp');
     const buildEnv = { ...process.env, BREW_PREFIX };
-    const conf = await sh('cmake', ['--preset', PRESET], { cwd: cpp, env: buildEnv, timeoutS: 900, label: 'cmake configure' });
+    const extraCmake = (process.env.BB_CMAKE_ARGS || '').split(' ').filter(Boolean); // e.g. -DBB_LITE=ON on CI
+    const conf = await sh('cmake', ['--preset', PRESET, ...extraCmake], { cwd: cpp, env: buildEnv, timeoutS: 900, label: 'cmake configure' });
     if (conf.status !== 0) return { verdict: { status: 'failed', reason: 'build', stage: 'configure', detail: conf.out.slice(-800) }, code: 1 };
     if (DRY) {
       log('dry-run: stopping after build-config check (no build, no grade, boards untouched)');
