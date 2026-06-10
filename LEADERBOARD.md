@@ -29,10 +29,16 @@ GitHub's x86 fleet mixes CPU models (AMD EPYC / Intel Xeon — see the machine c
 
 ## Time board (ranked by ratio vs same-VM baseline)
 
-_(no runs yet)_
+| # | prover | vs same-VM baseline | prove time | baseline (same VM) | peak RSS | machine | date |
+|---|--------|------|------|------|------|------|------|
+| 1 | opt-next | **-12.5%** | 58.79 s | 67.19 s | 1871 MiB | `gh-x64/EPYC-7763` | 2026-06-10 |
+| 2 | baseline | **baseline** | 67.19 s | 67.19 s | 2027 MiB | `gh-x64/EPYC-7763` | 2026-06-10 |
 
 ## Memory board (ranked by peak RSS)
 
-_(no runs yet)_
+| # | prover | peak RSS | baseline (same VM) | prove time vs baseline | machine | date |
+|---|--------|------|------|------|------|------|
+| 1 | opt-next | **1871 MiB** | 2027 MiB | -12.5% | `gh-x64/EPYC-7763` | 2026-06-10 |
+| 2 | baseline | **2027 MiB** | 2027 MiB | baseline | `gh-x64/EPYC-7763` | 2026-06-10 |
 
 _Boards are produced only by the `official-grade` CI workflow on GitHub-hosted runners; every row records its machine. Numbers from different boards/machines are not directly comparable. Local numbers are advisory. To get on a board: see "Submitting" in the README._
