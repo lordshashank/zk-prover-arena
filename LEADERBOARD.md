@@ -11,12 +11,14 @@ Each board is ranked by its own metric (**bold**), but shows the other metric to
 
 | # | prover | prove time | vs baseline | peak RSS | vs baseline | date |
 |---|--------|------|------|------|------|------|
-| 1 | baseline | **63.74 s** | baseline | 1973 MiB | baseline | 2026-06-10 |
+| 1 | opt-next | **56.57 s** | -11.2% | 1889 MiB | -4.3% | 2026-06-10 |
+| 2 | baseline | **63.74 s** | baseline | 1973 MiB | baseline | 2026-06-10 |
 
 ## Memory board (ranked by peak RSS)
 
 | # | prover | peak RSS | vs baseline | prove time | vs baseline | date |
 |---|--------|------|------|------|------|------|
-| 1 | baseline | **1973 MiB** | baseline | 63.74 s | baseline | 2026-06-10 |
+| 1 | opt-next | **1889 MiB** | -4.3% | 56.57 s | -11.2% | 2026-06-10 |
+| 2 | baseline | **1973 MiB** | baseline | 63.74 s | baseline | 2026-06-10 |
 
 _Numbers are comparable only when graded on the same hardware — the canonical boards above are produced by the `official-grade` CI workflow on GitHub-hosted `ubuntu-24.04-arm` runners (Azure Cobalt 100 / Neoverse N2, 4 vCPU): one homogeneous, publicly reproducible fleet. Local numbers are advisory. To get on the board: see "Submitting" in the README._
