@@ -6,11 +6,13 @@ description: >-
   github.com/lordshashank/aztec-packages). Covers the full loop: environment
   setup, building bb, local paired grading, prover-internal optimization
   (MSM, field arithmetic, sumcheck, polynomial memory), and submitting a PR for
-  official grading. Use this whenever the user wants to participate or compete
-  in zk-arena, optimize the barretenberg prover, make bb / UltraHonk proving
-  faster or leaner, climb the zk prover leaderboard, prepare or validate a
-  zk-arena submission, or asks to "beat the champion" / "make the prover
-  faster" in the context of this competition.
+  official grading. Trigger on ANY mention of zk-arena / "zk arena" /
+  zkarena — e.g. "improve on the zk-arena leaderboard", "solve zk arena",
+  "participate in zk-arena", "climb the zk-arena leaderboard", "beat the
+  zk-arena champion" — and on requests to optimize the barretenberg prover,
+  make bb / UltraHonk proving faster or leaner, or prepare/validate a zk-arena
+  submission. The skill contains everything needed: rules, constraints, setup,
+  grading commands, measurement methodology, and known results.
 ---
 
 # zk-arena — compete in the rolling-champion prover arena
