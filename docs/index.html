@@ -7,16 +7,28 @@
 <meta name="description" content="An open optimization arena for ZK prover research: a rolling-champion barretenberg UltraHonk prover. Every merged PR beat the branch it merged into.">
 <style>
   :root {
-    --bg: #f2efe6; --card: #fbfaf6; --ink: #1c211d; --dim: #6b7269; --faint: #99a096;
-    --line: #e3e0d4; --line-soft: #eceadf;
-    --green-deep: #2c5743; --green-deep-2: #234936; --on-green: #f4f6ef; --on-green-dim: #b9cdbc;
-    --good: #1d7a46; --bad: #c2453a; --chip-bg: #f0ede2; --chip-line: #ddd9c9;
+    --bg: #f4f2ea; --card: #fcfbf7; --ink: #21242c; --dim: #696e79; --faint: #9aa0aa;
+    --line: #e5e2d8; --line-soft: #edebe1;
+    --hero-bg: #252b42; --hero-bg-2: #1d2233; --on-hero: #eef0f8; --on-hero-dim: #a6adc9;
+    --hero-accent: #aab9ff;
+    --btn: #252b42; --btn-2: #1c2133; --on-btn: #eef0f8;
+    --good: #25784a; --bad: #c14b40; --chip-bg: #f0eee3; --chip-line: #ded9ca;
+    --warn: #8a6a15; --warn-bg: rgba(208,158,50,.16);
+    --chart-time: #aab9ff; --chart-mem: #5fd4c0;
+    --chart-grid: rgba(255,255,255,.10); --chart-axis: rgba(238,240,248,.5);
+    --tip-bg: #23262f; --tip-ink: #f2f2ee; --tip-line: #23262f;
   }
   [data-theme="dark"] {
-    --bg: #101312; --card: #181c1a; --ink: #e7eae5; --dim: #9aa49b; --faint: #6b746c;
-    --line: #262b27; --line-soft: #20251f;
-    --green-deep: #234c3a; --green-deep-2: #1c3e2f; --on-green: #eef3ea; --on-green-dim: #9fb8a3;
-    --good: #4fbf7e; --bad: #e07b72; --chip-bg: #20251f; --chip-line: #2e342c;
+    --bg: #131419; --card: #1a1c23; --ink: #e6e7ec; --dim: #9aa0ad; --faint: #6d717e;
+    --line: #272a34; --line-soft: #21242d;
+    --hero-bg: #1d2336; --hero-bg-2: #171c2b; --on-hero: #e9ecf6; --on-hero-dim: #98a1c2;
+    --hero-accent: #aab9ff;
+    --btn: #3b4670; --btn-2: #46527f; --on-btn: #eef0f8;
+    --good: #54c98b; --bad: #ec8378; --chip-bg: #20232c; --chip-line: #2e3240;
+    --warn: #d9b35c; --warn-bg: rgba(217,179,92,.12);
+    --chart-time: #a3b4ff; --chart-mem: #58cdbb;
+    --chart-grid: rgba(255,255,255,.08); --chart-axis: rgba(233,236,246,.45);
+    --tip-bg: #2a2e3b; --tip-ink: #e9eaf0; --tip-line: #3a3f4f;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html { background: var(--bg); }
@@ -30,7 +42,7 @@
   a { color: inherit; }
 
   /* header */
-  .top { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 18px; }
+  .top { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 18px; flex-wrap: wrap; }
   .brand { font-weight: 700; font-size: 17px; letter-spacing: -.3px; text-decoration: none; }
   .brand small { font-weight: 400; color: var(--dim); margin-left: 8px; font-size: 12px; }
   .nav { display: flex; align-items: center; gap: 8px; }
@@ -40,13 +52,13 @@
     background: var(--card); white-space: nowrap;
   }
   .pill:hover { border-color: var(--faint); }
-  .pill.solid { background: var(--green-deep); color: var(--on-green); border-color: var(--green-deep); }
-  .pill.solid:hover { background: var(--green-deep-2); }
+  .pill.solid { background: var(--btn); color: var(--on-btn); border-color: var(--btn); }
+  .pill.solid:hover { background: var(--btn-2); border-color: var(--btn-2); }
   #theme { cursor: pointer; padding: 7px 11px; }
 
   /* hero */
   .hero {
-    background: var(--green-deep); color: var(--on-green); border-radius: 20px;
+    background: var(--hero-bg); color: var(--on-hero); border-radius: 20px;
     padding: 30px 32px 18px; position: relative; overflow: hidden;
   }
   .hero::after {
@@ -54,28 +66,51 @@
     border-radius: 50%; border: 56px solid rgba(255,255,255,.045); pointer-events: none;
   }
   .headline { font-size: clamp(22px, 3.6vw, 34px); font-weight: 700; letter-spacing: -.5px; line-height: 1.25; }
-  .headline .accent { color: #b9f6c8; }
-  .subline { color: var(--on-green-dim); margin-top: 6px; font-size: 13px; }
+  .headline .accent { color: var(--hero-accent); }
+  .subline { color: var(--on-hero-dim); margin-top: 6px; font-size: 13px; }
   .subline a { color: inherit; }
 
   .hero-meta { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 18px 0 4px; flex-wrap: wrap; }
   .hero-stats { display: flex; gap: 26px; flex-wrap: wrap; }
-  .hstat .k { font-size: 10.5px; text-transform: uppercase; letter-spacing: 1.4px; color: var(--on-green-dim); }
+  .hstat .k { font-size: 10.5px; text-transform: uppercase; letter-spacing: 1.4px; color: var(--on-hero-dim); }
   .hstat .v { font-size: 19px; font-weight: 700; }
-  .hstat .v small { font-weight: 400; font-size: 12px; color: var(--on-green-dim); }
-  .metric-toggle { display: inline-flex; border: 1px solid rgba(255,255,255,.22); border-radius: 99px; padding: 2px; }
-  .metric-toggle button {
-    border: 0; background: transparent; color: var(--on-green-dim); font: inherit; font-size: 11.5px;
-    padding: 4px 12px; border-radius: 99px; cursor: pointer;
-  }
-  .metric-toggle button.on { background: rgba(255,255,255,.92); color: var(--green-deep); font-weight: 600; }
+  .hstat .v small { font-weight: 400; font-size: 12px; color: var(--on-hero-dim); }
+  .legend { display: flex; align-items: center; gap: 18px; font-size: 11.5px; color: var(--on-hero-dim); white-space: nowrap; }
+  .legend .sw { display: inline-block; width: 16px; height: 3px; border-radius: 2px; margin-right: 7px; vertical-align: 3px; }
+  .legend .sw.time { background: var(--chart-time); }
+  .legend .sw.mem { background: var(--chart-mem); }
   .hero svg { width: 100%; height: 190px; display: block; position: relative; }
-  .hero .axis { fill: rgba(255,255,255,.45); font-size: 10px; }
-  .hero .gridline { stroke: rgba(255,255,255,.10); }
-  .hero .baseline { stroke: rgba(255,255,255,.45); stroke-dasharray: 4 5; stroke-width: 1; }
-  .hero .series { stroke: #fff; stroke-width: 2; fill: none; }
-  .hero .fill { fill: rgba(255,255,255,.07); }
-  .hero .dot { fill: #fff; }
+  .hero .axis { fill: var(--chart-axis); font-size: 10px; }
+  .hero .axis.t { fill: var(--chart-time); opacity: .85; }
+  .hero .axis.m { fill: var(--chart-mem); opacity: .85; }
+  .hero .gridline { stroke: var(--chart-grid); }
+  .hero .series { stroke-width: 2; fill: none; }
+  .hero .series.time { stroke: var(--chart-time); }
+  .hero .series.mem { stroke: var(--chart-mem); }
+  .hero .fill-time { fill: var(--chart-time); opacity: .08; }
+  .hero .dot.time { fill: var(--chart-time); }
+  .hero .dot.mem { fill: var(--chart-mem); }
+  .hero .dot.base { fill: var(--hero-bg); stroke-width: 1.8; }
+  .hero .dot.base.time { stroke: var(--chart-time); }
+  .hero .dot.base.mem { stroke: var(--chart-mem); }
+
+  /* info hints (ⓘ tooltips) */
+  .hint {
+    position: relative; display: inline-flex; align-items: center; justify-content: center;
+    width: 14px; height: 14px; margin-left: 6px; border: 1px solid var(--faint); border-radius: 50%;
+    font-size: 9px; line-height: 1; font-weight: 600; color: var(--dim); cursor: help;
+    text-transform: none; letter-spacing: 0; vertical-align: 1px; user-select: none;
+  }
+  .hint:hover, .hint:focus-visible { border-color: var(--dim); color: var(--ink); outline: none; }
+  .hint .tip {
+    position: fixed; left: 0; top: 0; visibility: hidden; opacity: 0; transition: opacity .12s;
+    width: max-content; max-width: 260px; padding: 8px 11px; border-radius: 8px;
+    background: var(--tip-bg); color: var(--tip-ink); border: 1px solid var(--tip-line);
+    font-size: 11px; font-weight: 400; line-height: 1.55; letter-spacing: 0; text-transform: none;
+    text-align: left; white-space: normal; pointer-events: none; z-index: 60;
+    box-shadow: 0 8px 24px rgba(10,12,24,.22);
+  }
+  .hint:hover .tip, .hint:focus .tip, .hint:focus-visible .tip, .hint.forced .tip { visibility: visible; opacity: 1; }
 
   /* leaderboard card */
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 18px; margin-top: 18px; overflow: hidden; }
@@ -104,7 +139,8 @@
   .solver { display: flex; align-items: center; gap: 10px; }
   .solver img { width: 26px; height: 26px; border-radius: 50%; border: 1px solid var(--line); }
   .solver .who { line-height: 1.35; }
-  .solver .name { font-weight: 600; }
+  .solver .name { font-weight: 600; text-decoration: none; }
+  .solver a.name:hover { text-decoration: underline; }
   .chip {
     display: inline-flex; align-items: center; gap: 4px; font-size: 10.5px; color: var(--dim);
     background: var(--chip-bg); border: 1px solid var(--chip-line); border-radius: 99px; padding: 1px 8px;
@@ -117,20 +153,61 @@
   .d-none { color: var(--faint); }
   .when { color: var(--dim); font-size: 12px; }
   .badge { display: inline-block; font-size: 10px; border-radius: 99px; padding: 1px 7px; margin-top: 2px; }
-  .badge.tradeoff { color: #8a6d00; background: rgba(251,191,36,.14); }
+  .badge.tradeoff { color: var(--warn); background: var(--warn-bg); }
   .badge.origin { color: var(--faint); border: 1px solid var(--line); }
   .change-link { color: var(--dim); font-size: 11.5px; text-decoration: none; display: block; max-width: 280px; overflow: hidden; text-overflow: ellipsis; }
   .change-link:hover { color: var(--ink); text-decoration: underline; }
 
   .empty { color: var(--dim); padding: 26px; text-align: center; }
+
+  /* participate modal */
+  dialog#participate-modal {
+    margin: auto; /* the global reset removes the UA auto-centering */
+    border: 1px solid var(--line); border-radius: 16px; background: var(--card); color: var(--ink);
+    padding: 22px 24px; width: min(560px, calc(100vw - 40px)); font: inherit;
+    box-shadow: 0 24px 80px rgba(10,12,24,.35);
+  }
+  dialog#participate-modal::backdrop { background: rgba(16,18,26,.45); backdrop-filter: blur(3px); }
+  .modal-head { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 16px; }
+  .modal-title { font-size: 17px; font-weight: 700; }
+  .modal-sub { color: var(--dim); font-size: 12.5px; margin-top: 2px; }
+  .modal-close {
+    border: 0; background: transparent; color: var(--dim); font: inherit; font-size: 15px;
+    cursor: pointer; padding: 2px 6px; border-radius: 6px;
+  }
+  .modal-close:hover { color: var(--ink); }
+  .terminal {
+    position: relative; background: #15171d; color: #e8eaf2; border-radius: 12px;
+    padding: 16px 18px; font-size: 12.5px; line-height: 1.9;
+  }
+  .tline { display: flex; gap: 14px; }
+  .tline code { white-space: pre-wrap; word-break: break-word; }
+  .tline .tno { color: #5b606f; user-select: none; flex: none; width: 10px; text-align: right; }
+  .tline.cmt code { color: #7c8294; }
+  .term-copy {
+    position: absolute; top: 10px; right: 10px; border: 0; background: transparent; color: #8b91a3;
+    font: inherit; font-size: 15px; cursor: pointer; padding: 4px 7px; border-radius: 6px;
+  }
+  .term-copy:hover { color: #fff; background: rgba(255,255,255,.08); }
+  .term-copy.done { color: #6fe0a0; }
+  .modal-foot { color: var(--dim); font-size: 12px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line-soft); line-height: 1.7; }
+  .modal-foot code { color: var(--ink); }
   .statusline { color: var(--faint); font-size: 11.5px; margin: 14px 4px 0; }
   .statusline .ok { color: var(--good); }
   .statusline .err { color: var(--bad); }
   .statusline a { color: var(--dim); }
 
-  footer { margin-top: 34px; color: var(--faint); font-size: 11.5px; line-height: 1.8; }
-  footer a { color: var(--dim); }
-  footer code { color: var(--dim); }
+  footer {
+    margin-top: 36px; padding-top: 18px; border-top: 1px solid var(--line);
+    display: flex; align-items: center; justify-content: space-between; gap: 14px;
+    color: var(--dim); font-size: 12.5px;
+  }
+  footer a { color: var(--dim); text-decoration: none; }
+  footer a:hover { color: var(--ink); }
+  .foot-left b { color: var(--ink); font-weight: 600; }
+  .foot-icons { display: flex; align-items: center; gap: 16px; }
+  .foot-icons a { display: inline-flex; color: var(--dim); }
+  .foot-icons a:hover { color: var(--ink); }
 </style>
 </head>
 <body>
@@ -138,8 +215,8 @@
 <div class="top">
   <a class="brand" href="./">zk-arena<small>barretenberg · UltraHonk</small></a>
   <nav class="nav">
-    <a class="pill" href="https://github.com/lordshashank/aztec-packages/blob/zk-arena/zk-arena/README.md">how it works</a>
-    <a class="pill solid" href="https://github.com/lordshashank/aztec-packages">submit a PR</a>
+    <a class="pill" href="https://github.com/lordshashank/aztec-packages/blob/zk-arena/zk-arena/README.md" target="_blank" rel="noopener">How it works</a>
+    <button class="pill solid" id="participate-btn">Participate</button>
     <button class="pill" id="theme" title="toggle theme" aria-label="toggle theme">◐</button>
   </nav>
 </div>
@@ -149,9 +226,9 @@
   <div class="subline">one frozen 2²¹ proving task · every merged PR beat the branch it merged into · <a href="https://github.com/lordshashank/aztec-packages/blob/zk-arena/zk-arena/README.md">grading &amp; rules</a></div>
   <div class="hero-meta">
     <div class="hero-stats" id="hero-stats"></div>
-    <div class="metric-toggle" id="metric-toggle">
-      <button data-m="time" class="on">prove time</button>
-      <button data-m="mem">peak rss</button>
+    <div class="legend">
+      <span><i class="sw time"></i>prove time (s)</span>
+      <span><i class="sw mem"></i>peak rss (MiB)</span>
     </div>
   </div>
   <svg id="chart"></svg>
@@ -168,7 +245,12 @@
   <div class="tablewrap">
     <table>
       <thead><tr>
-        <th>solver</th><th>prove time</th><th>Δ time</th><th>Δ rss</th><th>x86 ratio</th><th>merged</th>
+        <th>solver</th>
+        <th>prove time<span class="hint" tabindex="0" aria-label="5-run median wall-clock of bb prove, single thread, on the arm64 Cobalt-100 runner. Sub-line = peak RSS.">i<span class="tip" role="tooltip">5-run median wall-clock of bb prove, single thread, on the arm64 Cobalt-100 runner. Sub-line = peak RSS.</span></span></th>
+        <th>Δ time<span class="hint" tabindex="0" aria-label="Improvement vs the branch tip this PR was graded against (paired runs on the same VM). Negative-colored = regression.">i<span class="tip" role="tooltip">Improvement vs the branch tip this PR was graded against (paired runs on the same VM). Negative-colored = regression.</span></span></th>
+        <th>Δ rss<span class="hint" tabindex="0" aria-label="Peak-RSS change vs the same paired base. Green = less memory.">i<span class="tip" role="tooltip">Peak-RSS change vs the same paired base. Green = less memory.</span></span></th>
+        <th>x86 ratio<span class="hint" tabindex="0" aria-label="Candidate time ÷ base time on the same x86 VM (mixed fleet, so ratio not seconds). Below 1.0 = faster.">i<span class="tip" role="tooltip">Candidate time ÷ base time on the same x86 VM (mixed fleet, so ratio not seconds). Below 1.0 = faster.</span></span></th>
+        <th>merged<span class="hint" tabindex="0" aria-label="Date the PR was merged and became the new base everyone must beat.">i<span class="tip" role="tooltip">Date the PR was merged and became the new base everyone must beat.</span></span></th>
       </tr></thead>
       <tbody id="rows"></tbody>
     </table>
@@ -182,14 +264,36 @@
 <div class="statusline" id="status"></div>
 
 <footer>
-  base <code><a href="https://github.com/AztecProtocol/aztec-packages/commit/7e94c2c0e32820e25e20d39a426d546dae56a34f">7e94c2c0e3</a></code>
-  — 63.74 s / 1973 MiB (arm64 official) · soundness anchored to the frozen verifier + VK, forever ·
-  graded paired vs branch tip on gh runners (arm64 absolute · x86 ratio), 5-run median, fresh witness per run, 1 thread
-  <br>
-  <a href="https://github.com/lordshashank/aztec-packages/blob/zk-arena/zk-arena/LEADERBOARD.md">leaderboard.md</a> ·
-  <a href="https://github.com/lordshashank/zk-prover-arena/blob/main/RESEARCH.md">research log</a> ·
-  <a href="https://github.com/lordshashank/zk-prover-arena">grading spec</a>
+  <div class="foot-left">A <a href="https://github.com/lordshashank" target="_blank" rel="noopener"><b>lordshashank</b></a> project</div>
+  <div class="foot-icons">
+    <a href="https://x.com/0xlord_forever" target="_blank" rel="noopener" aria-label="X (Twitter)" title="X">
+      <svg viewBox="0 0 24 24" width="17" height="17" fill="currentColor" aria-hidden="true"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231 5.451-6.231zm-1.161 17.52h1.833L7.084 4.126H5.117l11.966 15.644z"/></svg>
+    </a>
+    <a href="https://github.com/lordshashank/zk-prover-arena" target="_blank" rel="noopener" aria-label="GitHub" title="GitHub">
+      <svg viewBox="0 0 16 16" width="18" height="18" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+    </a>
+  </div>
 </footer>
+
+<dialog id="participate-modal">
+  <div class="modal-head">
+    <div>
+      <div class="modal-title">Participate</div>
+      <div class="modal-sub">Point a coding agent at it.</div>
+    </div>
+    <button class="modal-close" id="participate-close" aria-label="close">&#10005;</button>
+  </div>
+  <div class="terminal">
+    <button class="term-copy" id="term-copy" aria-label="copy install command" title="copy">&#x2398;</button>
+    <div class="tline"><span class="tno">1</span><code id="install-cmd">npx skills add lordshashank/zk-prover-arena</code></div>
+    <div class="tline cmt"><span class="tno">2</span><code># then ask your agent to:</code></div>
+    <div class="tline"><span class="tno">3</span><code>"improve on the zk-arena leaderboard"</code></div>
+  </div>
+  <div class="modal-foot">
+    Installing adds the <code>zk-arena</code> skill, so a coding agent can run the whole
+    loop for you — setup, rules, measurement discipline, and the submission PR.
+  </div>
+</dialog>
 
 <script>
 const BASE = { timeS: 63.74, peakMiB: 1973, sha: '7e94c2c0e3', date: '2026-06-10' };
@@ -197,11 +301,19 @@ const REPO = 'lordshashank/aztec-packages';
 const DATA_URL = new URLSearchParams(location.search).get('src')
   || `https://raw.githubusercontent.com/${REPO}/zk-arena/zk-arena/log.jsonl`;
 
-/* theme: saved choice > system preference */
+/* theme: saved choice wins; default is light for everyone (no system detection) */
 const root = document.documentElement;
 const applyTheme = (t) => root.setAttribute('data-theme', t);
-const savedTheme = localStorage.getItem('zk-arena-theme');
-applyTheme(savedTheme || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'));
+applyTheme(localStorage.getItem('zk-arena-theme') === 'dark' ? 'dark' : 'light');
+const modal = document.getElementById('participate-modal');
+document.getElementById('participate-btn').onclick = () => modal.showModal();
+document.getElementById('participate-close').onclick = () => modal.close();
+modal.addEventListener('click', (e) => { if (e.target === modal) modal.close(); }); /* backdrop click */
+document.getElementById('term-copy').onclick = async (e) => {
+  const b = e.currentTarget;
+  try { await navigator.clipboard.writeText(document.getElementById('install-cmd').textContent); } catch {}
+  b.classList.add('done'); setTimeout(() => b.classList.remove('done'), 1400);
+};
 document.getElementById('theme').onclick = () => {
   const next = root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
   localStorage.setItem('zk-arena-theme', next); applyTheme(next);
@@ -217,47 +329,59 @@ function dcell(v, unit) { /* positive = improvement */
   return `<span class="${good ? 'd-good' : 'd-bad'}">${good ? '−' : '+'}${Math.abs(v).toFixed(unit === 's' ? 2 : 0)} ${unit}</span>`;
 }
 
+/* tooltips: shown by CSS on hover/focus; JS only pins fixed coords so the
+   scrolling table wrapper can never clip them */
+function placeTip(h) {
+  const tip = h.querySelector('.tip'); if (!tip) return;
+  const r = h.getBoundingClientRect();
+  tip.style.top = `${Math.round(r.bottom + 8)}px`;
+  const left = Math.max(8, Math.min(r.left + r.width / 2 - tip.offsetWidth / 2, innerWidth - tip.offsetWidth - 8));
+  tip.style.left = `${Math.round(left)}px`;
+}
+document.addEventListener('pointerover', (e) => { const h = e.target.closest?.('.hint'); if (h) placeTip(h); });
+document.addEventListener('focusin', (e) => { const h = e.target.closest?.('.hint'); if (h) placeTip(h); });
+
 let MERGES = [];
-let metric = 'time';
 
 function drawChart() {
   const svg = document.getElementById('chart');
-  const series = [{ v: metric === 'time' ? BASE.timeS : BASE.peakMiB, tick: 'base' }]
-    .concat(MERGES.map((e) => ({ v: metric === 'time' ? e.verdict.arm64.cand.timeS : e.verdict.arm64.cand.peakMiB, tick: `#${e.pr}` })));
-  const W = 1000, H = 190, padL = 44, padR = 18, padT = 14, padB = 24;
+  const pts = [{ t: BASE.timeS, m: BASE.peakMiB, tick: 'base' }]
+    .concat(MERGES.map((e) => ({ t: e.verdict.arm64.cand.timeS, m: e.verdict.arm64.cand.peakMiB, tick: `#${e.pr}` })));
+  const W = 1000, H = 190, padL = 46, padR = 46, padT = 14, padB = 24;
   svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
   svg.setAttribute('preserveAspectRatio', 'none');
-  const ys = series.map((p) => p.v);
-  let lo = Math.min(...ys), hi = Math.max(...ys);
-  const span = Math.max(hi - lo, hi * 0.04); lo = Math.max(0, lo - span * 0.22); hi = hi + span * 0.14;
-  const x = (i) => series.length === 1 ? padL : padL + (W - padL - padR) * (i / (series.length - 1));
-  const y = (v) => padT + (H - padT - padB) * (1 - (v - lo) / (hi - lo));
+  const scale = (vals) => {
+    let lo = Math.min(...vals), hi = Math.max(...vals);
+    const span = Math.max(hi - lo, hi * 0.04);
+    return { lo: Math.max(0, lo - span * 0.22), hi: hi + span * 0.14 };
+  };
+  const st = scale(pts.map((p) => p.t)), sm = scale(pts.map((p) => p.m));
+  const x = (i) => pts.length === 1 ? padL : padL + (W - padL - padR) * (i / (pts.length - 1));
+  const y = (v, s) => padT + (H - padT - padB) * (1 - (v - s.lo) / (s.hi - s.lo));
   let g = '';
   for (let k = 0; k <= 2; k++) {
-    const vy = padT + (H - padT - padB) * (k / 2);
+    const f = k / 2, vy = padT + (H - padT - padB) * f;
     g += `<line class="gridline" x1="${padL}" y1="${vy}" x2="${W - padR}" y2="${vy}"/>`;
-    g += `<text class="axis" x="${padL - 8}" y="${vy + 3}" text-anchor="end">${Math.round(hi - (hi - lo) * (k / 2))}</text>`;
+    g += `<text class="axis t" x="${padL - 8}" y="${vy + 3}" text-anchor="end">${Math.round(st.hi - (st.hi - st.lo) * f)}</text>`;
+    g += `<text class="axis m" x="${W - padR + 8}" y="${vy + 3}" text-anchor="start">${Math.round(sm.hi - (sm.hi - sm.lo) * f)}</text>`;
   }
-  g += `<line class="baseline" x1="${padL}" y1="${y(series[0].v)}" x2="${W - padR}" y2="${y(series[0].v)}"/>`;
-  g += `<text class="axis" x="${W - padR}" y="${y(series[0].v) - 5}" text-anchor="end">base</text>`;
-  let d = `M ${x(0)} ${y(series[0].v)}`;
-  for (let i = 1; i < series.length; i++) d += ` L ${x(i)} ${y(series[i - 1].v)} L ${x(i)} ${y(series[i].v)}`;
-  g += `<path class="fill" d="${d} L ${x(series.length - 1)} ${H - padB} L ${x(0)} ${H - padB} Z"/>`;
-  g += `<path class="series" d="${d}"/>`;
-  series.forEach((p, i) => {
-    g += `<circle class="dot" cx="${x(i)}" cy="${y(p.v)}" r="3.2"><title>${esc(p.tick)}: ${p.v}</title></circle>`;
-    g += `<text class="axis" x="${x(i)}" y="${H - 8}" text-anchor="${i === 0 ? 'start' : (i === series.length - 1 ? 'end' : 'middle')}">${esc(p.tick)}</text>`;
+  const path = (key, s) => {
+    let d = `M ${x(0)} ${y(pts[0][key], s)}`;
+    for (let i = 1; i < pts.length; i++) d += ` L ${x(i)} ${y(pts[i - 1][key], s)} L ${x(i)} ${y(pts[i][key], s)}`;
+    return d;
+  };
+  const dt = path('t', st), dm = path('m', sm);
+  g += `<path class="fill-time" d="${dt} L ${x(pts.length - 1)} ${H - padB} L ${x(0)} ${H - padB} Z"/>`;
+  g += `<path class="series mem" d="${dm}"/>`;
+  g += `<path class="series time" d="${dt}"/>`;
+  pts.forEach((p, i) => {
+    const base = i === 0 ? ' base' : ''; /* hollow dots mark each series' base at the left edge */
+    g += `<circle class="dot mem${base}" cx="${x(i)}" cy="${y(p.m, sm)}" r="3.2"><title>${esc(p.tick)}: ${p.m} MiB</title></circle>`;
+    g += `<circle class="dot time${base}" cx="${x(i)}" cy="${y(p.t, st)}" r="3.2"><title>${esc(p.tick)}: ${p.t} s</title></circle>`;
+    g += `<text class="axis" x="${x(i)}" y="${H - 8}" text-anchor="${i === 0 ? 'start' : (i === pts.length - 1 ? 'end' : 'middle')}">${esc(p.tick)}</text>`;
   });
   svg.innerHTML = g;
 }
-
-document.querySelectorAll('#metric-toggle button').forEach((b) => {
-  b.onclick = () => {
-    metric = b.dataset.m;
-    document.querySelectorAll('#metric-toggle button').forEach((o) => o.classList.toggle('on', o === b));
-    drawChart();
-  };
-});
 
 function render(entries) {
   MERGES = entries.filter((e) => e?.verdict?.arm64?.cand);
@@ -278,7 +402,7 @@ function render(entries) {
   document.getElementById('board-sub').textContent =
     `${MERGES.length} merged improvement${MERGES.length === 1 ? '' : 's'} · ${solvers} solver${solvers === 1 ? '' : 's'} · single thread, arm64 Cobalt-100`;
   document.getElementById('best').innerHTML = `
-    <div class="k">champion</div>
+    <div class="k">champion<span class="hint" tabindex="0" aria-label="The current zk-arena branch tip = the last merged improvement.">i<span class="tip" role="tooltip">The current zk-arena branch tip = the last merged improvement.</span></span></div>
     <div class="v">${fmt2(champ.timeS)} s <small>· ${fmt0(champ.peakMiB)} MiB</small></div>
     <div class="d ${MERGES.length ? 'd-good' : 'd-none'}">${MERGES.length ? `−${tPct.toFixed(1)}% time · −${mPct.toFixed(1)}% rss` : 'the base itself'}</div>`;
 
@@ -289,7 +413,7 @@ function render(entries) {
     rows.push(`<tr>
       <td><div class="solver">
         <img src="https://github.com/${encodeURIComponent(e.author || 'ghost')}.png?size=52" alt="" loading="lazy">
-        <div class="who"><span class="name">${esc(e.author || '?')}</span>${model}
+        <div class="who"><a class="name" href="https://github.com/${encodeURIComponent(e.author || 'ghost')}">${esc(e.author || '?')}</a>${model}
           <a class="change-link" href="https://github.com/${REPO}/pull/${e.pr}">#${e.pr} ${esc(e.title || '')}</a>
         </div></div></td>
       <td class="num score"><div class="main">${fmt2(c.timeS)} s</div><div class="subv">${fmt0(c.peakMiB)} MiB</div></td>
