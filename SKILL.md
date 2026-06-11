@@ -1,13 +1,3 @@
----
-name: zk-prover-arena-submit
-description: >-
-  DEPRECATED — the patch-based submission flow this skill documented is dead. The arena
-  moved to the rolling-champion flow on the zk-arena branch of
-  github.com/lordshashank/aztec-packages. For participating in zk-arena / optimizing
-  the barretenberg UltraHonk prover, use the installable skill in skills/zk-arena/
-  instead.
----
-
 # This flow has moved
 
 The patch-based submission loop this file used to document (submission dirs +
