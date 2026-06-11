@@ -90,7 +90,7 @@ them short, the grading does the judging:
   against a build of the zk-arena tip), machine, methodology notes.
 - **Attribution** — a `model:` line is **required**: the AI model(s) that produced the
   optimization, or `human` (examples from the template: `claude-fable-5`,
-  `gpt-5-codex`, `human`, `human+claude-fable-5`). It lands on the public leaderboard.
+  `gpt-5-codex`, or `human` if no AI produced it — one or the other, never combined). It lands on the public leaderboard.
 
 Flow: push your branch to a fork of `lordshashank/aztec-packages` → open the PR against
 `zk-arena` → `zk-arena-policy` runs automatically → ask the maintainer in the PR to
