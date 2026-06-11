@@ -3,3 +3,4 @@ iso	stack	task	median_prove_s	peak_rss_MiB	verified	valid	note	machine
 2026-06-10T14:49:35.265Z	opt-next	hard2pow21-v2	56.57	1889	1	1		gh-arm64/Cobalt-100
 2026-06-10T16:08:21.982Z	opt-next	hard2pow21-v2	57.03	1889	1	1		gh-arm64/Cobalt-100
 2026-06-11T08:25:35.702Z	opt-next2	hard2pow21-v2	45.6	1844	1	1		gh-arm64/Cobalt-100
+2026-06-11T09:38:32.620Z	opt-next3	hard2pow21-v2	45.04	1464	1	1		gh-arm64/Cobalt-100

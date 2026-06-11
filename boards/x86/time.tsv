@@ -3,3 +3,5 @@ iso	stack	task	ratio	median_prove_s	baseline_median_s	peak_rss_MiB	verified	vali
 2026-06-10T16:29:01.160Z	opt-next	hard2pow21-v2	0.875	58.79	67.19	1871	1	1		gh-x64/EPYC-7763
 2026-06-11T08:18:20.350Z	baseline	hard2pow21-v2	1.0000	66.69	66.69	2027	1	1		gh-x64/EPYC-7763
 2026-06-11T08:34:52.552Z	opt-next2	hard2pow21-v2	0.8607	57.4	66.69	1802	1	1		gh-x64/EPYC-7763
+2026-06-11T09:31:34.314Z	baseline	hard2pow21-v2	1.0000	67.19	67.19	2025	1	1		gh-x64/EPYC-7763
+2026-06-11T09:48:19.161Z	opt-next3	hard2pow21-v2	0.8527	57.29	67.19	1456	1	1		gh-x64/EPYC-7763
