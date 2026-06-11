@@ -70,6 +70,48 @@ Also confirmed in the same harness: **GLV endomorphism decomposition at large n 
 
 From the sumcheck/PCS literature survey (all transcript-compatible): Gruen's skip-one-evaluation via the round-sum constraint (~8–12% of sumcheck; Jolt ships it), Dao–Thaler evaluation-at-infinity (+5–10%), Blendy-style late materialization of the sumcheck partial-evaluation table (−0.5–0.7 GiB for ~1–2 s — attractive for the memory board with its 2× time budget), σ/id stored as u32 indices with lazy field materialization (~−350 MiB), gate-separator table split (−64 MiB). From the MSM side: a clean signed-digit legacy implementation and a CycloneMSM-style delayed scheduler replacing the radix sort (~4–8%). The remaining gap to the original "halve the baseline" target (≤ ~14 s) plausibly closes with the signed-digit redo plus two of the sumcheck items.
 
+## Part II — the canonical-environment campaign (2026-06-11)
+
+After grading moved to the canonical CI runners (arm64 Cobalt-100 absolute seconds; x86 ratio board), a second campaign targeted ≥20% on **both** axes against the CI baseline (63.74 s / 1973 MiB). Everything below was A/B-measured in a local Linux-arm64 container that reproduces the CI toolchain (clang-20, same preset); container peak RSS tracked the official runner within ~0.3%, and container time ratios predicted official seconds within ~1.5%.
+
+### 8. Enable the arm64 asm everywhere (the one-line, biggest-single-win change)
+
+The hand-scheduled Montgomery asm (§2) was gated on `__APPLE__` and therefore **dormant on the canonical Neoverse runner**. The scheduling targets the A64 ISA (breaking clang's serialized `__int128` carry chains through the single NZCV register), not Apple micro-architecture. Widening the gate to all aarch64: the single largest contributor to the official −28.5%.
+
+### 9. Signed-Booth digits in the legacy Pippenger
+
+Digits in [−2^(c−1), 2^(c−1)] (reusing the rewrite's `booth_recode.hpp`), bucket = |digit|, sign applied branchlessly as points enter buckets (the rhs predicate masked by `buckets_match` so accumulators are never re-negated). Halving the bucket range moves the window optimum one bit wider at equal bucket memory: 17 → 16 rounds at 2^21 with the bucket array still L2-resident. Same-binary interleaved A/B: −3.8% of MSM-stage time. Two traps documented in the commit: Booth encodes some zero digits with the sign bit set (must be stored sign-cleared for the radix sort's zero-count), and `c=17` blows the 4 MB L2 (6.3 MB of buckets) and loses 17%.
+
+### 10. The accumulation loop is DRAM-latency-bound — prefetch accordingly
+
+Bucket-sorted scheduling makes the per-entry point loads effectively random over 128 MB: measured ~470 ns/add against ~85 ns of arithmetic. Deepening the prefetch lookahead 32 → 256 recovered −6% of the accumulate stage (sweep: 64/128/256 monotone improvement, 512 regresses; a "prefetch only the new window entries" variant also regresses — the redundant half-window re-prefetch keeps lines resident). Lesson: after the asm work, the MSM is a memory-system problem, not an arithmetic one — which is also why signed digits under-delivered vs. the operation-count model.
+
+### 11. Memory: kill the phases above the floor…
+
+Three transcript-identical changes removed everything the prove phases added above the proving-key floor: (a) **release every prover polynomial after its last read** — the Gemini ρ-batching pass — via an opt-in consume flag (the to-be-shifted set aliases the unshifted set, so release happens after both batching passes); (b) **split the gate-separator pow table** (Dao–Thaler): two half-domain tables, 64 MiB → ~100 KB, L1-resident vs DRAM-streamed, one extra mul per lookup (time-neutral); (c) **σ/id as u32 sidecars** — every σ/id value is ±FF(k) for k < 2^31 by construction (SEPARATOR = 2^28; public-input overrides are negated small indices), so after sumcheck's first-round fold (made entity-interleaved: allocate, fold, release per entity) the ~384 MiB of Fr originals are dropped and the batching pass reads 4-byte sidecars with the ρ power of the original slot. After these, **RSS is flat from PK-complete to the last KZG commit**.
+
+### 12. …then kill the proving-key transient itself
+
+With the prove phases flattened, a 50 ms-granularity RSS trace showed the process peak is set in the **first 0.8 s** — circuit construction and PK build. Three findings:
+
+- **Per-variable copy-cycle vectors were the hidden bomb.** Millions of ~32-byte heap chunks (one `std::vector` per circuit variable) both inflate the live footprint and leave the glibc arena fragmented-and-retained exactly where the σ/id materialization then allocates fresh mmaps. Replacing them with a flat CSR layout (one node array + offsets, per-cycle write cursors preserving block order) cut **−160 MiB of peak** — the largest single memory win of the campaign.
+- **`BB_POLY_STATS` (per-polynomial value-size census) pays for itself.** It showed q_m on this trace is 46 MB of *pure zeros* and q_c/q_r/q_o/q_4 are 75–96% zeros: the wide selectors are now trimmed to their nonzero support after population (reads outside hit virtual zeros, identical values).
+- u32-first permutation computation (sidecars while cycles are alive, Fr materialized after cycles drop), z_perm allocation deferred to its first write (the grand product), and a `malloc_trim` before the materialization climb each contributed smaller amounts. A `mallopt(M_MMAP_THRESHOLD)` experiment to force arena reuse **regressed +90 MiB** (fragmentation) and was dropped.
+
+### 13. Failed / descoped this round
+
+- **Gruen skip-one-eval**: this base removed the `Univariate` skip machinery, and the subrelation accumulators' barycentric extension assumes consecutive 0..L−1 domains — a transcript-identical implementation means reworking the barycentric layer for every subrelation length. Descoped at ~0.3 s local value; the MSM cache work returned 4× that at a fraction of the risk.
+- **Batch scratch sizing** (512/4096 vs 2048): noise-level.
+- **Measurement discipline, again**: cross-binary Mac wall-clock A/B is noise-dominated (±1 s); only same-binary interleaved A/B or container A/B settled questions. Two false alarms this session came from the test harness (a relative VK path resolved from the wrong cwd produced phantom `verify` failures), not the prover.
+
+### Official results
+
+| submission | arm64 (Cobalt-100) | vs baseline | x86 ratio | peak RSS (arm64) | vs baseline |
+|---|---|---|---|---|---|
+| baseline | 63.74 s / 1973 MiB | — | — | 1973 MiB | — |
+| opt-next2 (accepted) | **45.60 s** (σ=0.06) | **−28.5%** | 0.861 | 1844 MiB | −6.5% |
+| opt-next3 (submitted) | container-projected ~43–44 s | ~−31% | — | container-projected ~1460 MiB | ~−26% |
+
 ## Provenance
 
 Optimization branches live in [lordshashank/aztec-packages](https://github.com/lordshashank/aztec-packages): PR #1 (task-v1 variant, base `zk-arena-base`), PR #2 (task-v2 / upstream-`next` variant, base `next-base`). Each accepted arena submission carries its full grader transcript under `submissions/transcripts/`. Much of the implementation and measurement was done by coding agents (Claude) driving the build–grade–verify loop; the masking rank analysis, cost modeling, and acceptance decisions are documented in the commit messages and this file.
