@@ -43,13 +43,13 @@
 
   /* header */
   .top { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 18px; flex-wrap: wrap; }
-  .brand { font-weight: 700; font-size: 17px; letter-spacing: -.3px; text-decoration: none; }
+  .brand { font-weight: 700; font-size: 17px; letter-spacing: -.3px; }
   .brand small { font-weight: 400; color: var(--dim); margin-left: 8px; font-size: 12px; }
   .nav { display: flex; align-items: center; gap: 8px; }
   .pill {
     display: inline-flex; align-items: center; gap: 6px; padding: 7px 14px; border-radius: 99px;
     font-size: 12.5px; text-decoration: none; border: 1px solid var(--line); color: var(--ink);
-    background: var(--card); white-space: nowrap;
+    background: var(--card); white-space: nowrap; cursor: pointer; font-family: inherit;
   }
   .pill:hover { border-color: var(--faint); }
   .pill.solid { background: var(--btn); color: var(--on-btn); border-color: var(--btn); }
@@ -213,7 +213,7 @@
 <body>
 
 <div class="top">
-  <a class="brand" href="./">zk-arena<small>barretenberg · UltraHonk</small></a>
+  <div class="brand">zk-arena<small>barretenberg · UltraHonk</small></div>
   <nav class="nav">
     <a class="pill" href="https://github.com/lordshashank/aztec-packages/blob/zk-arena/zk-arena/README.md" target="_blank" rel="noopener">How it works</a>
     <button class="pill solid" id="participate-btn">Participate</button>
@@ -223,7 +223,7 @@
 
 <section class="hero">
   <div class="headline" id="headline">…</div>
-  <div class="subline">one frozen 2²¹ proving task · every merged PR beat the branch it merged into · <a href="https://github.com/lordshashank/aztec-packages/blob/zk-arena/zk-arena/README.md">grading &amp; rules</a></div>
+  <div class="subline">one frozen 2²¹ proving task · every merged PR beat the branch it merged into · <a href="https://github.com/lordshashank/aztec-packages/blob/zk-arena/zk-arena/README.md" target="_blank" rel="noopener">grading &amp; rules</a></div>
   <div class="hero-meta">
     <div class="hero-stats" id="hero-stats"></div>
     <div class="legend">
@@ -257,14 +257,14 @@
   </div>
   <div class="empty" id="empty" style="display:none">
     no merged submissions yet — the base stands undefeated.
-    <a href="https://github.com/lordshashank/aztec-packages/blob/zk-arena/zk-arena/README.md">be the first.</a>
+    <a href="https://github.com/lordshashank/aztec-packages/blob/zk-arena/zk-arena/README.md" target="_blank" rel="noopener">be the first.</a>
   </div>
 </section>
 
 <div class="statusline" id="status"></div>
 
 <footer>
-  <div class="foot-left">A <a href="https://github.com/lordshashank" target="_blank" rel="noopener"><b>lordshashank</b></a> project</div>
+  <div class="foot-left">made by <a href="https://github.com/lordshashank" target="_blank" rel="noopener"><b>shashank</b></a> and <b>claude</b></div>
   <div class="foot-icons">
     <a href="https://x.com/0xlord_forever" target="_blank" rel="noopener" aria-label="X (Twitter)" title="X">
       <svg viewBox="0 0 24 24" width="17" height="17" fill="currentColor" aria-hidden="true"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231 5.451-6.231zm-1.161 17.52h1.833L7.084 4.126H5.117l11.966 15.644z"/></svg>
@@ -413,8 +413,8 @@ function render(entries) {
     rows.push(`<tr>
       <td><div class="solver">
         <img src="https://github.com/${encodeURIComponent(e.author || 'ghost')}.png?size=52" alt="" loading="lazy">
-        <div class="who"><a class="name" href="https://github.com/${encodeURIComponent(e.author || 'ghost')}">${esc(e.author || '?')}</a>${model}
-          <a class="change-link" href="https://github.com/${REPO}/pull/${e.pr}">#${e.pr} ${esc(e.title || '')}</a>
+        <div class="who"><a class="name" href="https://github.com/${encodeURIComponent(e.author || 'ghost')}" target="_blank" rel="noopener">${esc(e.author || '?')}</a>${model}
+          <a class="change-link" href="https://github.com/${REPO}/pull/${e.pr}" target="_blank" rel="noopener">#${e.pr} ${esc(e.title || '')}</a>
         </div></div></td>
       <td class="num score"><div class="main">${fmt2(c.timeS)} s</div><div class="subv">${fmt0(c.peakMiB)} MiB</div></td>
       <td class="num">${dcell(a.timeDeltaS, 's')}</td>
@@ -425,7 +425,7 @@ function render(entries) {
   });
   rows.push(`<tr>
     <td><div class="solver"><div class="who"><span class="name" style="color:var(--dim)">pinned base</span>
-      <a class="change-link" href="https://github.com/AztecProtocol/aztec-packages/commit/7e94c2c0e32820e25e20d39a426d546dae56a34f"><code>${BASE.sha}</code> · the origin every line above descends from</a>
+      <a class="change-link" href="https://github.com/AztecProtocol/aztec-packages/commit/7e94c2c0e32820e25e20d39a426d546dae56a34f" target="_blank" rel="noopener"><code>${BASE.sha}</code> · the origin every line above descends from</a>
     </div></div></td>
     <td class="num score"><div class="main">${fmt2(BASE.timeS)} s</div><div class="subv">${BASE.peakMiB} MiB</div></td>
     <td class="num"><span class="d-none">—</span></td>
@@ -445,7 +445,7 @@ async function load() {
     if (!res.ok) throw new Error(`fetch ${res.status}`);
     const text = await res.text();
     render(text.split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean));
-    status.innerHTML = `<span class="ok">●</span> live from <a href="https://github.com/${REPO}/blob/zk-arena/zk-arena/log.jsonl">zk-arena/log.jsonl</a> — updated ${new Date().toLocaleTimeString()}`;
+    status.innerHTML = `<span class="ok">●</span> live from <a href="https://github.com/${REPO}/blob/zk-arena/zk-arena/log.jsonl" target="_blank" rel="noopener">zk-arena/log.jsonl</a> — updated ${new Date().toLocaleTimeString()}`;
   } catch (err) {
     render([]);
     status.innerHTML = `<span class="err">●</span> could not load live data (${esc(err.message)}) — showing base only`;
