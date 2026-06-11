@@ -1,0 +1,2276 @@
+diff --git a/barretenberg/cpp/src/barretenberg/bb/cli.cpp b/barretenberg/cpp/src/barretenberg/bb/cli.cpp
+index f3e3dc36cc..45acc95d17 100644
+--- a/barretenberg/cpp/src/barretenberg/bb/cli.cpp
++++ b/barretenberg/cpp/src/barretenberg/bb/cli.cpp
+@@ -1100,6 +1100,13 @@ int parse_and_run_cli_command(int argc, char* argv[])
+                     vinfo("Perfetto aggregate trace written to ", trace_out_perfetto_aggregate);
+                 }
+ #endif
++                // --memory_profile_out enables checkpoint collection for every prove path, but the
++                // file was only written on the chonk branch; mirror it here so plain `prove` works.
++                if (!memory_profile_out.empty()) {
++                    std::ofstream file(memory_profile_out);
++                    bb::detail::GLOBAL_MEMORY_PROFILE.serialize_json(file);
++                    vinfo("Memory profile written to ", memory_profile_out);
++                }
+                 return 0;
+             }
+             return execute_non_prove_command(api);
+diff --git a/barretenberg/cpp/src/barretenberg/bbapi/bbapi_ultra_honk.cpp b/barretenberg/cpp/src/barretenberg/bbapi/bbapi_ultra_honk.cpp
+index e89c53f393..3ff3dbd4cf 100644
+--- a/barretenberg/cpp/src/barretenberg/bbapi/bbapi_ultra_honk.cpp
++++ b/barretenberg/cpp/src/barretenberg/bbapi/bbapi_ultra_honk.cpp
+@@ -37,7 +37,9 @@ std::shared_ptr<ProverInstance_<Flavor>> _compute_prover_instance(std::vector<ui
+     // Measure function time and debug print
+     auto initial_time = std::chrono::high_resolution_clock::now();
+     typename Flavor::CircuitBuilder builder = _compute_circuit<Flavor, IO>(std::move(bytecode), std::move(witness));
+-    auto prover_instance = std::make_shared<ProverInstance_<Flavor>>(builder);
++    // The builder is not used after PK construction: let the ProverInstance consume it, releasing its memory as
++    // soon as each piece of data has been transferred into the prover polynomials.
++    auto prover_instance = std::make_shared<ProverInstance_<Flavor>>(builder, /*consume_circuit=*/true);
+     auto final_time = std::chrono::high_resolution_clock::now();
+     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(final_time - initial_time);
+     info("CircuitProve: Proving key computed in ", duration.count(), " ms");
+@@ -79,6 +81,9 @@ CircuitProve::Response _prove(std::vector<uint8_t>&& bytecode,
+ 
+     // Construct proof
+     UltraProver_<Flavor> prover{ prover_instance, vk };
++    // One-shot prove: the instance's polynomials have no readers after their last use inside the PCS,
++    // so let the prover release them as it goes (same rationale as consume_circuit above).
++    prover.consume_polynomials = true;
+     Proof full_proof = prover.construct_proof();
+ 
+     // Compute where to split (inner public inputs vs everything else)
+diff --git a/barretenberg/cpp/src/barretenberg/commitment_schemes/gemini/gemini.hpp b/barretenberg/cpp/src/barretenberg/commitment_schemes/gemini/gemini.hpp
+index 0cc9972c85..88e0432a47 100644
+--- a/barretenberg/cpp/src/barretenberg/commitment_schemes/gemini/gemini.hpp
++++ b/barretenberg/cpp/src/barretenberg/commitment_schemes/gemini/gemini.hpp
+@@ -9,6 +9,7 @@
+ #include "barretenberg/commitment_schemes/claim.hpp"
+ #include "barretenberg/commitment_schemes/claim_batcher.hpp"
+ #include "barretenberg/common/bb_bench.hpp"
++#include "barretenberg/polynomials/compressed_index_polynomial.hpp"
+ #include "barretenberg/polynomials/polynomial.hpp"
+ #include "barretenberg/transcript/transcript.hpp"
+ 
+@@ -129,6 +130,10 @@ template <typename Curve> class GeminiProver_ {
+ 
+         size_t full_batched_size = 0; // size of the full batched polynomial (generally the circuit size)
+         size_t actual_data_size_ = 0; // max end_index across all polynomials (actual data extent)
++        // If set, the source polynomials are released (backing memory freed) at the end of compute_batched —
++        // the batching pass is their last read in a one-shot prove. Opt-in: callers that reuse the
++        // polynomials after proving (folding, tests) must leave this off.
++        bool consume_sources_ = false;
+ 
+         Polynomial batched_unshifted;            // linear combination of unshifted polynomials
+         Polynomial batched_to_be_shifted_by_one; // linear combination of to-be-shifted polynomials
+@@ -147,6 +152,11 @@ template <typename Curve> class GeminiProver_ {
+         std::vector<std::pair<size_t, Polynomial>> unshifted_tails_;
+         std::vector<std::pair<size_t, Polynomial>> shifted_tails_;
+ 
++        // Compressed u32-backed unshifted sources (sigma/id sidecars): their Fr originals were released
++        // after sumcheck's first-round fold; their batching contribution is re-derived here with the
++        // rho power of their original slot in the unshifted ordering. Pairs of (slot index, sidecar).
++        std::vector<std::pair<size_t, const CompressedIndexPolynomial*>> compressed_unshifted_;
++
+         PolynomialBatcher(const size_t full_batched_size, const size_t actual_data_size = 0)
+             : full_batched_size(full_batched_size)
+             , actual_data_size_(actual_data_size == 0 ? full_batched_size : actual_data_size)
+@@ -160,6 +170,7 @@ template <typename Curve> class GeminiProver_ {
+         // Set references to the polynomials to be batched
+         void set_unshifted(RefVector<Polynomial> polynomials) { unshifted = polynomials; }
+         void set_to_be_shifted_by_one(RefVector<Polynomial> polynomials) { to_be_shifted_by_one = polynomials; }
++        void set_consume_sources(bool consume) { consume_sources_ = consume; }
+ 
+         void add_unshifted_tail(size_t batcher_index, Polynomial&& tail)
+         {
+@@ -170,6 +181,11 @@ template <typename Curve> class GeminiProver_ {
+             shifted_tails_.emplace_back(batcher_index, std::move(tail));
+         }
+ 
++        void add_compressed_unshifted(size_t batcher_index, const CompressedIndexPolynomial* sidecar)
++        {
++            compressed_unshifted_.emplace_back(batcher_index, sidecar);
++        }
++
+         /**
+          * @brief Compute batched polynomial A₀ = F + G/X as the linear combination of all polynomials to be opened,
+          * where F is the linear combination of the unshifted polynomials and G is the linear combination of the
+@@ -219,6 +235,16 @@ template <typename Curve> class GeminiProver_ {
+             Fr unshifted_base(1);
+             if (has_unshifted()) {
+                 batch(batched_unshifted, unshifted);
++                // Accumulate the u32-backed sources (released sigma/id) with the rho power of their
++                // original slot. Values are identical to batching the Fr originals: decompress
++                // reproduces the exact field elements the permutation argument wrote.
++                for (const auto& [slot, sidecar] : compressed_unshifted_) {
++                    const Fr scalar = challenge.pow(slot);
++                    const size_t end = sidecar->end_index();
++                    for (size_t i = sidecar->start_index; i < end; ++i) {
++                        batched_unshifted.at(i) += scalar * sidecar->template decompress<Fr>(i);
++                    }
++                }
+                 full_batched += batched_unshifted;
+             }
+             batch_tails(batched_unshifted_tail_, unshifted_tails_, unshifted_base);
+@@ -236,6 +262,20 @@ template <typename Curve> class GeminiProver_ {
+                 full_batched += batched_shifted_tail_.shifted();
+             }
+ 
++            // The batching pass above is the last read of the source polynomials; everything downstream
++            // (folds, A₀₊/A₀₋, Shplonk, KZG) works off the batched accumulators. Release the sources now so
++            // their memory does not sit under the PCS-phase peak. The to-be-shifted set aliases entries of
++            // the unshifted set (wires/z_perm are opened both ways), so freeing happens only after both
++            // batching passes; double-release of the same entity is a harmless no-op.
++            if (consume_sources_) {
++                for (auto& poly : unshifted) {
++                    poly = Polynomial{};
++                }
++                for (auto& poly : to_be_shifted_by_one) {
++                    poly = Polynomial{};
++                }
++            }
++
+             return full_batched;
+         }
+ 
+diff --git a/barretenberg/cpp/src/barretenberg/commitment_schemes/gemini/gemini_impl.hpp b/barretenberg/cpp/src/barretenberg/commitment_schemes/gemini/gemini_impl.hpp
+index 11de4d3926..e41a1ccd21 100644
+--- a/barretenberg/cpp/src/barretenberg/commitment_schemes/gemini/gemini_impl.hpp
++++ b/barretenberg/cpp/src/barretenberg/commitment_schemes/gemini/gemini_impl.hpp
+@@ -68,6 +68,9 @@ std::vector<typename GeminiProver_<Curve>::Claim> GeminiProver_<Curve>::prove(
+ 
+     // Construct the d-1 Gemini foldings of A₀(X)
+     std::vector<Polynomial> fold_polynomials = compute_fold_polynomials(log_n, multilinear_challenge, A_0);
++    // A₀ is fully consumed by the foldings; release its buffer before the partially-evaluated batch
++    // polynomials A₀₊/A₀₋ are allocated (they are derived from the batcher's internal F/G, not from A₀).
++    A_0 = Polynomial();
+ 
+     // If virtual_log_n >= log_n, pad the fold commitments with dummy group elements [1]_1.
+     for (size_t l = 0; l < virtual_log_n - 1; l++) {
+diff --git a/barretenberg/cpp/src/barretenberg/commitment_schemes/shplonk/shplonk.hpp b/barretenberg/cpp/src/barretenberg/commitment_schemes/shplonk/shplonk.hpp
+index 0b0328e72f..4f82388a5d 100644
+--- a/barretenberg/cpp/src/barretenberg/commitment_schemes/shplonk/shplonk.hpp
++++ b/barretenberg/cpp/src/barretenberg/commitment_schemes/shplonk/shplonk.hpp
+@@ -64,29 +64,37 @@ template <typename Curve> class ShplonkProver_ {
+         }
+         // Q(X) = ∑ⱼ νʲ ⋅ ( fⱼ(X) − vⱼ) / ( X − xⱼ )
+         Polynomial Q(max_poly_size);
+-        Polynomial tmp(max_poly_size);
++
++        // Accumulate scale ⋅ (f(X) − v)/(X − x) into Q in a single fused top-down pass, without materializing
++        // a per-claim quotient polynomial. The quotient coefficients satisfy q_i = f_{i+1} + x·q_{i+1} and do
++        // not depend on f_0 (the evaluation shift at index 0 only affects the remainder), so each claim
++        // polynomial is read exactly once and never copied. Field arithmetic is exact, hence the accumulated
++        // values are identical to the former copy + factor_roots + add_scaled sequence.
++        auto accumulate_quotient = [&Q](const Polynomial& f, const Fr& x, const Fr& scale) {
++            const size_t end = f.end_index();
++            if (end < 2) {
++                return; // constant polynomial: zero quotient
++            }
++            Fr acc = f[end - 1];
++            for (size_t i = end - 1; i-- > 0;) {
++                Q.at(i) += scale * acc;
++                acc = f[i] + x * acc;
++            }
++        };
++        static_cast<void>(gemini_fold_pos_evaluations); // evaluations only shift the (discarded) remainder
+ 
+         Fr current_nu = Fr::one();
+ 
+-        size_t fold_idx = 0;
+         for (const auto& claim : opening_claims) {
+ 
+             // Gemini Fold Polynomials have to be opened at -r^{2^j} and r^{2^j}.
+             if (claim.gemini_fold) {
+-                tmp = claim.polynomial;
+-                tmp.at(0) = tmp[0] - gemini_fold_pos_evaluations[fold_idx++];
+-                tmp.factor_roots(-claim.opening_pair.challenge);
+-                // Add the claim quotient to the batched quotient polynomial
+-                Q.add_scaled(tmp, current_nu);
++                accumulate_quotient(claim.polynomial, -claim.opening_pair.challenge, current_nu);
+                 current_nu *= nu;
+             }
+ 
+-            // Compute individual claim quotient tmp = ( fⱼ(X) − vⱼ) / ( X − xⱼ )
+-            tmp = claim.polynomial;
+-            tmp.at(0) = tmp[0] - claim.opening_pair.evaluation;
+-            tmp.factor_roots(claim.opening_pair.challenge);
+-            // Add the claim quotient to the batched quotient polynomial
+-            Q.add_scaled(tmp, current_nu);
++            // Accumulate the claim quotient ( fⱼ(X) − vⱼ) / ( X − xⱼ ) into the batched quotient
++            accumulate_quotient(claim.polynomial, claim.opening_pair.challenge, current_nu);
+             current_nu *= nu;
+         }
+         // We use the same batching challenge for Gemini and Libra opening claims. The number of the claims
+@@ -97,25 +105,14 @@ template <typename Curve> class ShplonkProver_ {
+         }
+ 
+         for (const auto& claim : libra_opening_claims) {
+-            // Compute individual claim quotient tmp = ( fⱼ(X) − vⱼ) / ( X − xⱼ )
+-            tmp = claim.polynomial;
+-            tmp.at(0) = tmp[0] - claim.opening_pair.evaluation;
+-            tmp.factor_roots(claim.opening_pair.challenge);
+-
+-            // Add the claim quotient to the batched quotient polynomial
+-            Q.add_scaled(tmp, current_nu);
++            // Accumulate the claim quotient ( fⱼ(X) − vⱼ) / ( X − xⱼ ) into the batched quotient
++            accumulate_quotient(claim.polynomial, claim.opening_pair.challenge, current_nu);
+             current_nu *= nu;
+         }
+ 
+         for (const auto& claim : sumcheck_round_claims) {
+-
+-            // Compute individual claim quotient tmp = ( fⱼ(X) − vⱼ) / ( X − xⱼ )
+-            tmp = claim.polynomial;
+-            tmp.at(0) = tmp[0] - claim.opening_pair.evaluation;
+-            tmp.factor_roots(claim.opening_pair.challenge);
+-
+-            // Add the claim quotient to the batched quotient polynomial
+-            Q.add_scaled(tmp, current_nu);
++            // Accumulate the claim quotient ( fⱼ(X) − vⱼ) / ( X − xⱼ ) into the batched quotient
++            accumulate_quotient(claim.polynomial, claim.opening_pair.challenge, current_nu);
+             current_nu *= nu;
+         }
+         // Return batched quotient polynomial Q(X)
+diff --git a/barretenberg/cpp/src/barretenberg/ecc/fields/field.hpp b/barretenberg/cpp/src/barretenberg/ecc/fields/field.hpp
+index 61b3d99c95..0ff9780624 100644
+--- a/barretenberg/cpp/src/barretenberg/ecc/fields/field.hpp
++++ b/barretenberg/cpp/src/barretenberg/ecc/fields/field.hpp
+@@ -12,5 +12,6 @@
+  *        declarations header) Spectialized definitions are in "field_impl_generic.hpp" and "field_impl_x64.hpp"
+  *        (which include "field_impl.hpp")
+  */
++#include "./field_impl_arm64.hpp"
+ #include "./field_impl_generic.hpp"
+ #include "./field_impl_x64.hpp"
+diff --git a/barretenberg/cpp/src/barretenberg/ecc/fields/field_declarations.hpp b/barretenberg/cpp/src/barretenberg/ecc/fields/field_declarations.hpp
+index 1239d684d6..de5bdddad4 100644
+--- a/barretenberg/cpp/src/barretenberg/ecc/fields/field_declarations.hpp
++++ b/barretenberg/cpp/src/barretenberg/ecc/fields/field_declarations.hpp
+@@ -27,6 +27,23 @@
+ #define BBERG_NO_ASM 1
+ #endif
+ 
++// On arm64 we provide hand-scheduled inline-assembly Montgomery multiplication and squaring
++// routines (see field_impl_arm64.hpp). They apply only to 4x64-bit-limb fields whose
++// modulus top limb is < 2^62 (the "no-carry" CIOS condition); everything else falls through to
++// the generic implementation. The scheduling (two-pass carry chains through the single NZCV
++// register) targets the A64 ISA, not a particular micro-architecture: it helps any wide arm64
++// core (verified on Apple M-series and Neoverse) because the win comes from breaking clang's
++// serialized __int128 carry chains, not from machine-specific tuning.
++// NOTE: the build system passes -DDISABLE_ASM=1 on every arm64 build (it predates arm64 assembly
++// and means "the x86-64 assembly is unavailable"), so that flag deliberately does NOT gate this
++// path. Define DISABLE_ARM64_ASM to force the generic implementation instead. The routines are
++// pure register asm (no memory operands), so they are safe under ASAN builds.
++#if defined(__aarch64__) && !defined(__wasm__) && !defined(DISABLE_ARM64_ASM) && defined(__SIZEOF_INT128__)
++#define BBERG_ARM64_ASM 1
++#else
++#define BBERG_ARM64_ASM 0
++#endif
++
+ namespace bb {
+ 
+ // Threshold for "large" moduli (>= 2^254). When the top limb of the modulus is >= 2^62,
+@@ -648,6 +665,21 @@ template <class Params_> struct alignas(32) field {
+     BB_INLINE static field asm_reduce_once(const field& a) noexcept;
+     BB_INLINE static void asm_self_reduce_once(field& a) noexcept;
+     static constexpr uint64_t zero_reference = 0x00ULL;
++#endif
++#if BBERG_ARM64_ASM
++    // Hand-scheduled arm64 inline-assembly Montgomery multiplication/squaring (no-carry CIOS).
++    // Bit-identical to the generic montgomery_mul/montgomery_square. Defined in field_impl_arm64.hpp.
++    BB_INLINE static field asm_montgomery_mul_arm64(const field& a, const field& b) noexcept;
++    BB_INLINE static field asm_montgomery_sqr_arm64(const field& a) noexcept;
++    // True (resolved by the optimizer post-inlining) when every limb is a compiler-known constant.
++    // In that case the constexpr-friendly generic path is preferred over the (opaque) inline
++    // assembly so expressions like `x + fr(1)` keep constant-folding at -O2/-O3.
++    BB_INLINE static constexpr bool arm64_known_constant(const field& a) noexcept
++    {
++        return static_cast<bool>(__builtin_constant_p(a.data[0])) &&
++               static_cast<bool>(__builtin_constant_p(a.data[1])) &&
++               static_cast<bool>(__builtin_constant_p(a.data[2])) && static_cast<bool>(__builtin_constant_p(a.data[3]));
++    }
+ #endif
+     constexpr field tonelli_shanks_sqrt() const noexcept;
+     static constexpr size_t primitive_root_log_size() noexcept;
+diff --git a/barretenberg/cpp/src/barretenberg/ecc/fields/field_impl.hpp b/barretenberg/cpp/src/barretenberg/ecc/fields/field_impl.hpp
+index c9283b3847..08f1133626 100644
+--- a/barretenberg/cpp/src/barretenberg/ecc/fields/field_impl.hpp
++++ b/barretenberg/cpp/src/barretenberg/ecc/fields/field_impl.hpp
+@@ -37,6 +37,18 @@ template <class T> constexpr field<T> field<T>::operator*(const field& other) co
+ {
+     if constexpr (BBERG_NO_ASM || (T::modulus_3 >= MODULUS_TOP_LIMB_LARGE_THRESHOLD) ||
+                   (T::modulus_1 == 0 && T::modulus_2 == 0 && T::modulus_3 == 0)) {
++#if BBERG_ARM64_ASM
++        // Apple arm64: hand-written assembly for 4-limb moduli satisfying the "no-carry" CIOS
++        // condition (top limb < 2^62). Bit-identical to montgomery_mul.
++        if constexpr ((T::modulus_3 < MODULUS_TOP_LIMB_LARGE_THRESHOLD) &&
++                      !(T::modulus_1 == 0 && T::modulus_2 == 0 && T::modulus_3 == 0)) {
++            if (!std::is_constant_evaluated() && !(arm64_known_constant(*this) && arm64_known_constant(other))) {
++                field result = asm_montgomery_mul_arm64(*this, other);
++                result.assert_coarse_form();
++                return result;
++            }
++        }
++#endif
+         // >= 255-bits or <= 64-bits.
+         return montgomery_mul(other);
+     } else {
+@@ -75,6 +87,17 @@ template <class T> constexpr field<T> field<T>::sqr() const noexcept
+ {
+     if constexpr (BBERG_NO_ASM || (T::modulus_3 >= MODULUS_TOP_LIMB_LARGE_THRESHOLD) ||
+                   (T::modulus_1 == 0 && T::modulus_2 == 0 && T::modulus_3 == 0)) {
++#if BBERG_ARM64_ASM
++        // Apple arm64: hand-written assembly squaring (see operator* above for conditions).
++        if constexpr ((T::modulus_3 < MODULUS_TOP_LIMB_LARGE_THRESHOLD) &&
++                      !(T::modulus_1 == 0 && T::modulus_2 == 0 && T::modulus_3 == 0)) {
++            if (!std::is_constant_evaluated() && !arm64_known_constant(*this)) {
++                field result = asm_montgomery_sqr_arm64(*this);
++                result.assert_coarse_form();
++                return result;
++            }
++        }
++#endif
+         return montgomery_square();
+     } else {
+         if (std::is_constant_evaluated()) {
+@@ -90,6 +113,17 @@ template <class T> constexpr void field<T>::self_sqr() & noexcept
+ {
+     if constexpr (BBERG_NO_ASM || (T::modulus_3 >= MODULUS_TOP_LIMB_LARGE_THRESHOLD) ||
+                   (T::modulus_1 == 0 && T::modulus_2 == 0 && T::modulus_3 == 0)) {
++#if BBERG_ARM64_ASM
++        // Apple arm64: hand-written assembly squaring (see operator* above for conditions).
++        if constexpr ((T::modulus_3 < MODULUS_TOP_LIMB_LARGE_THRESHOLD) &&
++                      !(T::modulus_1 == 0 && T::modulus_2 == 0 && T::modulus_3 == 0)) {
++            if (!std::is_constant_evaluated() && !arm64_known_constant(*this)) {
++                *this = asm_montgomery_sqr_arm64(*this);
++                assert_coarse_form();
++                return;
++            }
++        }
++#endif
+         *this = montgomery_square();
+     } else {
+         if (std::is_constant_evaluated()) {
+diff --git a/barretenberg/cpp/src/barretenberg/ecc/fields/field_impl_arm64.hpp b/barretenberg/cpp/src/barretenberg/ecc/fields/field_impl_arm64.hpp
+new file mode 100644
+index 0000000000..aaca9c2454
+--- /dev/null
++++ b/barretenberg/cpp/src/barretenberg/ecc/fields/field_impl_arm64.hpp
+@@ -0,0 +1,430 @@
++// === AUDIT STATUS ===
++// internal:    { status: not started, auditors: [], commit: }
++// external_1:  { status: not started, auditors: [], commit: }
++// external_2:  { status: not started, auditors: [], commit: }
++// =====================
++
++#pragma once
++
++#include "./field_impl.hpp"
++
++#if BBERG_ARM64_ASM
++
++namespace bb {
++
++/**
++ * @brief Montgomery multiplication for Apple-silicon arm64 (4x64-bit limbs, "no-carry" CIOS).
++ *
++ * @details Implements the interleaved (no-carry) CIOS algorithm — the exact same algorithm as the
++ * generic `montgomery_mul` — as hand-scheduled inline assembly. Valid only for moduli whose top
++ * limb is < 2^62 (the dispatch in field_impl.hpp guarantees this). Operands follow the coarse
++ * representation contract: inputs in [0, 2p) produce an output in [0, 2p), with NO final
++ * conditional subtraction, exactly like the generic implementation. The result is bit-identical
++ * to the generic implementation for all 256-bit inputs (including out-of-contract values): the
++ * only place the generic code can drop a carry is the final `t3 = c + a` (a mod-2^64 wrap of
++ * the 5th accumulator word), and the assembly below wraps the same word the same way.
++ *
++ * Scheduling notes (cf. gnark-crypto arm64 / EdMSM §6 "two-pass" trick): arm64 has a single flags
++ * register, so each round separates the low-product carry chain from the high-product carry chain;
++ * each chain then propagates as an uninterrupted adds/adcs/adc sequence. Two multiply-issue
++ * savings vs a naive translation:
++ *  - `k*p[0]`'s low half is never computed: t0 + lo(k*p0) == 0 (mod 2^64) by construction, so its
++ *    carry-out is simply (t0 != 0), produced by `cmp t0, #1`.
++ *  - `k = t0 * r_inv` is issued as soon as the new t0 is known, off the flags chains.
++ */
++template <class T> field<T> field<T>::asm_montgomery_mul_arm64(const field& a, const field& b) noexcept
++{
++    constexpr uint64_t r_inv = T::r_inv;
++    constexpr uint64_t p0 = modulus.data[0];
++    constexpr uint64_t p1 = modulus.data[1];
++    constexpr uint64_t p2 = modulus.data[2];
++    constexpr uint64_t p3 = modulus.data[3];
++
++    uint64_t t0;
++    uint64_t t1;
++    uint64_t t2;
++    uint64_t t3;
++    uint64_t t4;
++    uint64_t k;
++    uint64_t q1;
++    uint64_t q2;
++    uint64_t q3;
++    uint64_t u0;
++    uint64_t u1;
++    uint64_t u2;
++    uint64_t u3;
++
++    __asm__(
++        /* ---- round 0: t = a0 * b ---- */
++        "mul   %[t0], %[a0], %[b0]\n\t"
++        "umulh %[t1], %[a0], %[b0]\n\t"
++        "mul   %[q1], %[a0], %[b1]\n\t"
++        "umulh %[t2], %[a0], %[b1]\n\t"
++        "mul   %[k],  %[t0], %[ri]\n\t" /* k = t0 * r_inv (early: t0 is final) */
++        "mul   %[q2], %[a0], %[b2]\n\t"
++        "umulh %[t3], %[a0], %[b2]\n\t"
++        "mul   %[q3], %[a0], %[b3]\n\t"
++        "umulh %[t4], %[a0], %[b3]\n\t"
++        "adds  %[t1], %[t1], %[q1]\n\t"
++        "adcs  %[t2], %[t2], %[q2]\n\t"
++        "adcs  %[t3], %[t3], %[q3]\n\t"
++        "adc   %[t4], %[t4], xzr\n\t"
++        /* reduce: t = (t + k * p) >> 64 */
++        "mul   %[q1], %[k], %[p1]\n\t"
++        "umulh %[u0], %[k], %[p0]\n\t"
++        "mul   %[q2], %[k], %[p2]\n\t"
++        "umulh %[u1], %[k], %[p1]\n\t"
++        "mul   %[q3], %[k], %[p3]\n\t"
++        "umulh %[u2], %[k], %[p2]\n\t"
++        "umulh %[u3], %[k], %[p3]\n\t"
++        "cmp   %[t0], #1\n\t" /* carry = (t0 != 0) == carry-out of t0 + lo(k*p0) */
++        "adcs  %[t1], %[t1], %[q1]\n\t"
++        "adcs  %[t2], %[t2], %[q2]\n\t"
++        "adcs  %[t3], %[t3], %[q3]\n\t"
++        "adc   %[t4], %[t4], xzr\n\t"
++        "adds  %[t0], %[t1], %[u0]\n\t"
++        "adcs  %[t1], %[t2], %[u1]\n\t"
++        "adcs  %[t2], %[t3], %[u2]\n\t"
++        "adc   %[t3], %[t4], %[u3]\n\t"
++
++        /* ---- round 1: t += a1 * b ---- */
++        "mul   %[k],  %[a1], %[b0]\n\t"
++        "mul   %[q1], %[a1], %[b1]\n\t"
++        "mul   %[q2], %[a1], %[b2]\n\t"
++        "mul   %[q3], %[a1], %[b3]\n\t"
++        "umulh %[u0], %[a1], %[b0]\n\t"
++        "umulh %[u1], %[a1], %[b1]\n\t"
++        "umulh %[u2], %[a1], %[b2]\n\t"
++        "umulh %[u3], %[a1], %[b3]\n\t"
++        "adds  %[t0], %[t0], %[k]\n\t"
++        "adcs  %[t1], %[t1], %[q1]\n\t"
++        "adcs  %[t2], %[t2], %[q2]\n\t"
++        "adcs  %[t3], %[t3], %[q3]\n\t"
++        "adc   %[t4], xzr, xzr\n\t"
++        "mul   %[k], %[t0], %[ri]\n\t"
++        "adds  %[t1], %[t1], %[u0]\n\t"
++        "adcs  %[t2], %[t2], %[u1]\n\t"
++        "adcs  %[t3], %[t3], %[u2]\n\t"
++        "adc   %[t4], %[t4], %[u3]\n\t"
++        "mul   %[q1], %[k], %[p1]\n\t"
++        "umulh %[u0], %[k], %[p0]\n\t"
++        "mul   %[q2], %[k], %[p2]\n\t"
++        "umulh %[u1], %[k], %[p1]\n\t"
++        "mul   %[q3], %[k], %[p3]\n\t"
++        "umulh %[u2], %[k], %[p2]\n\t"
++        "umulh %[u3], %[k], %[p3]\n\t"
++        "cmp   %[t0], #1\n\t"
++        "adcs  %[t1], %[t1], %[q1]\n\t"
++        "adcs  %[t2], %[t2], %[q2]\n\t"
++        "adcs  %[t3], %[t3], %[q3]\n\t"
++        "adc   %[t4], %[t4], xzr\n\t"
++        "adds  %[t0], %[t1], %[u0]\n\t"
++        "adcs  %[t1], %[t2], %[u1]\n\t"
++        "adcs  %[t2], %[t3], %[u2]\n\t"
++        "adc   %[t3], %[t4], %[u3]\n\t"
++
++        /* ---- round 2: t += a2 * b ---- */
++        "mul   %[k],  %[a2], %[b0]\n\t"
++        "mul   %[q1], %[a2], %[b1]\n\t"
++        "mul   %[q2], %[a2], %[b2]\n\t"
++        "mul   %[q3], %[a2], %[b3]\n\t"
++        "umulh %[u0], %[a2], %[b0]\n\t"
++        "umulh %[u1], %[a2], %[b1]\n\t"
++        "umulh %[u2], %[a2], %[b2]\n\t"
++        "umulh %[u3], %[a2], %[b3]\n\t"
++        "adds  %[t0], %[t0], %[k]\n\t"
++        "adcs  %[t1], %[t1], %[q1]\n\t"
++        "adcs  %[t2], %[t2], %[q2]\n\t"
++        "adcs  %[t3], %[t3], %[q3]\n\t"
++        "adc   %[t4], xzr, xzr\n\t"
++        "mul   %[k], %[t0], %[ri]\n\t"
++        "adds  %[t1], %[t1], %[u0]\n\t"
++        "adcs  %[t2], %[t2], %[u1]\n\t"
++        "adcs  %[t3], %[t3], %[u2]\n\t"
++        "adc   %[t4], %[t4], %[u3]\n\t"
++        "mul   %[q1], %[k], %[p1]\n\t"
++        "umulh %[u0], %[k], %[p0]\n\t"
++        "mul   %[q2], %[k], %[p2]\n\t"
++        "umulh %[u1], %[k], %[p1]\n\t"
++        "mul   %[q3], %[k], %[p3]\n\t"
++        "umulh %[u2], %[k], %[p2]\n\t"
++        "umulh %[u3], %[k], %[p3]\n\t"
++        "cmp   %[t0], #1\n\t"
++        "adcs  %[t1], %[t1], %[q1]\n\t"
++        "adcs  %[t2], %[t2], %[q2]\n\t"
++        "adcs  %[t3], %[t3], %[q3]\n\t"
++        "adc   %[t4], %[t4], xzr\n\t"
++        "adds  %[t0], %[t1], %[u0]\n\t"
++        "adcs  %[t1], %[t2], %[u1]\n\t"
++        "adcs  %[t2], %[t3], %[u2]\n\t"
++        "adc   %[t3], %[t4], %[u3]\n\t"
++
++        /* ---- round 3: t += a3 * b ---- */
++        "mul   %[k],  %[a3], %[b0]\n\t"
++        "mul   %[q1], %[a3], %[b1]\n\t"
++        "mul   %[q2], %[a3], %[b2]\n\t"
++        "mul   %[q3], %[a3], %[b3]\n\t"
++        "umulh %[u0], %[a3], %[b0]\n\t"
++        "umulh %[u1], %[a3], %[b1]\n\t"
++        "umulh %[u2], %[a3], %[b2]\n\t"
++        "umulh %[u3], %[a3], %[b3]\n\t"
++        "adds  %[t0], %[t0], %[k]\n\t"
++        "adcs  %[t1], %[t1], %[q1]\n\t"
++        "adcs  %[t2], %[t2], %[q2]\n\t"
++        "adcs  %[t3], %[t3], %[q3]\n\t"
++        "adc   %[t4], xzr, xzr\n\t"
++        "mul   %[k], %[t0], %[ri]\n\t"
++        "adds  %[t1], %[t1], %[u0]\n\t"
++        "adcs  %[t2], %[t2], %[u1]\n\t"
++        "adcs  %[t3], %[t3], %[u2]\n\t"
++        "adc   %[t4], %[t4], %[u3]\n\t"
++        "mul   %[q1], %[k], %[p1]\n\t"
++        "umulh %[u0], %[k], %[p0]\n\t"
++        "mul   %[q2], %[k], %[p2]\n\t"
++        "umulh %[u1], %[k], %[p1]\n\t"
++        "mul   %[q3], %[k], %[p3]\n\t"
++        "umulh %[u2], %[k], %[p2]\n\t"
++        "umulh %[u3], %[k], %[p3]\n\t"
++        "cmp   %[t0], #1\n\t"
++        "adcs  %[t1], %[t1], %[q1]\n\t"
++        "adcs  %[t2], %[t2], %[q2]\n\t"
++        "adcs  %[t3], %[t3], %[q3]\n\t"
++        "adc   %[t4], %[t4], xzr\n\t"
++        "adds  %[t0], %[t1], %[u0]\n\t"
++        "adcs  %[t1], %[t2], %[u1]\n\t"
++        "adcs  %[t2], %[t3], %[u2]\n\t"
++        "adc   %[t3], %[t4], %[u3]\n\t"
++        : [t0] "=&r"(t0),
++          [t1] "=&r"(t1),
++          [t2] "=&r"(t2),
++          [t3] "=&r"(t3),
++          [t4] "=&r"(t4),
++          [k] "=&r"(k),
++          [q1] "=&r"(q1),
++          [q2] "=&r"(q2),
++          [q3] "=&r"(q3),
++          [u0] "=&r"(u0),
++          [u1] "=&r"(u1),
++          [u2] "=&r"(u2),
++          [u3] "=&r"(u3)
++        : [a0] "r"(a.data[0]),
++          [a1] "r"(a.data[1]),
++          [a2] "r"(a.data[2]),
++          [a3] "r"(a.data[3]),
++          [b0] "r"(b.data[0]),
++          [b1] "r"(b.data[1]),
++          [b2] "r"(b.data[2]),
++          [b3] "r"(b.data[3]),
++          [p0] "r"(p0),
++          [p1] "r"(p1),
++          [p2] "r"(p2),
++          [p3] "r"(p3),
++          [ri] "r"(r_inv)
++        : "cc");
++
++    return { t0, t1, t2, t3 };
++}
++
++/**
++ * @brief Montgomery squaring for Apple-silicon arm64 (4x64-bit limbs, "no-carry" CIOS).
++ *
++ * @details Mirrors the generic `montgomery_square` round structure exactly: round r adds
++ * a_r^2 (at local word r) plus the doubled cross products 2*a_r*a_j (j > r) into the
++ * accumulator, keeping the accumulator's value modulo 2^320 (the generic code's
++ * `carry_hi` word — word 5 — is discarded between rounds; every mod-2^64 `adc` wrap below
++ * lands on the same word), then performs one Montgomery reduction step. This makes the
++ * routine bit-identical to the generic implementation for ALL inputs, including
++ * out-of-contract values >= 2p where carry drops actually occur.
++ * Saves 6 of the 16 a*b partial products vs asm_montgomery_mul_arm64.
++ */
++template <class T> field<T> field<T>::asm_montgomery_sqr_arm64(const field& a) noexcept
++{
++    constexpr uint64_t r_inv = T::r_inv;
++    constexpr uint64_t p0 = modulus.data[0];
++    constexpr uint64_t p1 = modulus.data[1];
++    constexpr uint64_t p2 = modulus.data[2];
++    constexpr uint64_t p3 = modulus.data[3];
++
++    uint64_t t0;
++    uint64_t t1;
++    uint64_t t2;
++    uint64_t t3;
++    uint64_t t4;
++    uint64_t k;
++    uint64_t s0;
++    uint64_t s1;
++    uint64_t x1;
++    uint64_t y1;
++    uint64_t x2;
++    uint64_t y2;
++    uint64_t x3;
++    uint64_t y3;
++
++    __asm__(
++        /* ---- round 0: t = a0^2 + 2*a0*(a1,a2,a3 << 64) ---- */
++        "mul   %[t0], %[a0], %[a0]\n\t"
++        "umulh %[s0], %[a0], %[a0]\n\t"
++        "mul   %[k],  %[t0], %[ri]\n\t" /* k = t0 * r_inv (t0 is final) */
++        "mul   %[x1], %[a1], %[a0]\n\t"
++        "umulh %[y1], %[a1], %[a0]\n\t"
++        "mul   %[x2], %[a2], %[a0]\n\t"
++        "umulh %[y2], %[a2], %[a0]\n\t"
++        "mul   %[x3], %[a3], %[a0]\n\t"
++        "umulh %[y3], %[a3], %[a0]\n\t"
++        /* cross row words 1..4 = (x1, y1+x2, y2+x3, y3+carry) */
++        "adds  %[y1], %[y1], %[x2]\n\t"
++        "adcs  %[y2], %[y2], %[x3]\n\t"
++        "adc   %[y3], %[y3], xzr\n\t"
++        /* double the row (mod 2^320: carry-out of word 4 is dropped); extr avoids flag ops */
++        "extr  %[y3], %[y3], %[y2], #63\n\t"
++        "extr  %[y2], %[y2], %[y1], #63\n\t"
++        "extr  %[y1], %[y1], %[x1], #63\n\t"
++        "lsl   %[x1], %[x1], #1\n\t"
++        /* t1..t4 = doubled row + hi(a0^2) */
++        "adds  %[t1], %[x1], %[s0]\n\t"
++        "adcs  %[t2], %[y1], xzr\n\t"
++        "adcs  %[t3], %[y2], xzr\n\t"
++        "adc   %[t4], %[y3], xzr\n\t"
++        /* reduce */
++        "mul   %[x1], %[k], %[p1]\n\t"
++        "umulh %[s0], %[k], %[p0]\n\t"
++        "mul   %[x2], %[k], %[p2]\n\t"
++        "umulh %[y1], %[k], %[p1]\n\t"
++        "mul   %[x3], %[k], %[p3]\n\t"
++        "umulh %[y2], %[k], %[p2]\n\t"
++        "umulh %[y3], %[k], %[p3]\n\t"
++        "cmp   %[t0], #1\n\t"
++        "adcs  %[t1], %[t1], %[x1]\n\t"
++        "adcs  %[t2], %[t2], %[x2]\n\t"
++        "adcs  %[t3], %[t3], %[x3]\n\t"
++        "adc   %[t4], %[t4], xzr\n\t"
++        "adds  %[t0], %[t1], %[s0]\n\t"
++        "adcs  %[t1], %[t2], %[y1]\n\t"
++        "adcs  %[t2], %[t3], %[y2]\n\t"
++        "adc   %[t3], %[t4], %[y3]\n\t"
++
++        /* ---- round 1: t += a1^2 << 64 + 2*a1*(a2,a3) << 128 ---- */
++        "mul   %[s0], %[a1], %[a1]\n\t"
++        "umulh %[s1], %[a1], %[a1]\n\t"
++        "mul   %[x2], %[a2], %[a1]\n\t"
++        "umulh %[y2], %[a2], %[a1]\n\t"
++        "mul   %[x3], %[a3], %[a1]\n\t"
++        "umulh %[y3], %[a3], %[a1]\n\t"
++        "adds  %[y2], %[y2], %[x3]\n\t" /* word 3 */
++        "adc   %[y3], %[y3], xzr\n\t"   /* word 4 */
++        /* double words 2..4 (mod 2^320) without flag ops */
++        "extr  %[y3], %[y3], %[y2], #63\n\t"
++        "extr  %[y2], %[y2], %[x2], #63\n\t"
++        "lsl   %[x2], %[x2], #1\n\t"
++        "adds  %[t1], %[t1], %[s0]\n\t" /* square chain */
++        "adcs  %[t2], %[t2], %[s1]\n\t"
++        "adcs  %[t3], %[t3], xzr\n\t"
++        "adc   %[t4], xzr, xzr\n\t"
++        "mul   %[k], %[t0], %[ri]\n\t"
++        "adds  %[t2], %[t2], %[x2]\n\t" /* doubled-row chain */
++        "adcs  %[t3], %[t3], %[y2]\n\t"
++        "adc   %[t4], %[t4], %[y3]\n\t"
++        /* reduce */
++        "mul   %[x1], %[k], %[p1]\n\t"
++        "umulh %[s0], %[k], %[p0]\n\t"
++        "mul   %[x2], %[k], %[p2]\n\t"
++        "umulh %[y1], %[k], %[p1]\n\t"
++        "mul   %[x3], %[k], %[p3]\n\t"
++        "umulh %[y2], %[k], %[p2]\n\t"
++        "umulh %[y3], %[k], %[p3]\n\t"
++        "cmp   %[t0], #1\n\t"
++        "adcs  %[t1], %[t1], %[x1]\n\t"
++        "adcs  %[t2], %[t2], %[x2]\n\t"
++        "adcs  %[t3], %[t3], %[x3]\n\t"
++        "adc   %[t4], %[t4], xzr\n\t"
++        "adds  %[t0], %[t1], %[s0]\n\t"
++        "adcs  %[t1], %[t2], %[y1]\n\t"
++        "adcs  %[t2], %[t3], %[y2]\n\t"
++        "adc   %[t3], %[t4], %[y3]\n\t"
++
++        /* ---- round 2: t += a2^2 << 128 + 2*a2*a3 << 192 ---- */
++        "mul   %[s0], %[a2], %[a2]\n\t"
++        "umulh %[s1], %[a2], %[a2]\n\t"
++        "mul   %[x3], %[a3], %[a2]\n\t"
++        "umulh %[y3], %[a3], %[a2]\n\t"
++        /* double words 3..4 (mod 2^320) without flag ops */
++        "extr  %[y3], %[y3], %[x3], #63\n\t"
++        "lsl   %[x3], %[x3], #1\n\t"
++        "adds  %[t2], %[t2], %[s0]\n\t"
++        "adcs  %[t3], %[t3], %[s1]\n\t"
++        "adc   %[t4], xzr, xzr\n\t"
++        "mul   %[k], %[t0], %[ri]\n\t"
++        "adds  %[t3], %[t3], %[x3]\n\t"
++        "adc   %[t4], %[t4], %[y3]\n\t"
++        /* reduce */
++        "mul   %[x1], %[k], %[p1]\n\t"
++        "umulh %[s0], %[k], %[p0]\n\t"
++        "mul   %[x2], %[k], %[p2]\n\t"
++        "umulh %[y1], %[k], %[p1]\n\t"
++        "mul   %[x3], %[k], %[p3]\n\t"
++        "umulh %[y2], %[k], %[p2]\n\t"
++        "umulh %[y3], %[k], %[p3]\n\t"
++        "cmp   %[t0], #1\n\t"
++        "adcs  %[t1], %[t1], %[x1]\n\t"
++        "adcs  %[t2], %[t2], %[x2]\n\t"
++        "adcs  %[t3], %[t3], %[x3]\n\t"
++        "adc   %[t4], %[t4], xzr\n\t"
++        "adds  %[t0], %[t1], %[s0]\n\t"
++        "adcs  %[t1], %[t2], %[y1]\n\t"
++        "adcs  %[t2], %[t3], %[y2]\n\t"
++        "adc   %[t3], %[t4], %[y3]\n\t"
++
++        /* ---- round 3: t += a3^2 << 192 ---- */
++        "mul   %[s0], %[a3], %[a3]\n\t"
++        "umulh %[s1], %[a3], %[a3]\n\t"
++        "adds  %[t3], %[t3], %[s0]\n\t"
++        "adc   %[t4], %[s1], xzr\n\t"
++        "mul   %[k], %[t0], %[ri]\n\t"
++        /* reduce */
++        "mul   %[x1], %[k], %[p1]\n\t"
++        "umulh %[s0], %[k], %[p0]\n\t"
++        "mul   %[x2], %[k], %[p2]\n\t"
++        "umulh %[y1], %[k], %[p1]\n\t"
++        "mul   %[x3], %[k], %[p3]\n\t"
++        "umulh %[y2], %[k], %[p2]\n\t"
++        "umulh %[y3], %[k], %[p3]\n\t"
++        "cmp   %[t0], #1\n\t"
++        "adcs  %[t1], %[t1], %[x1]\n\t"
++        "adcs  %[t2], %[t2], %[x2]\n\t"
++        "adcs  %[t3], %[t3], %[x3]\n\t"
++        "adc   %[t4], %[t4], xzr\n\t"
++        "adds  %[t0], %[t1], %[s0]\n\t"
++        "adcs  %[t1], %[t2], %[y1]\n\t"
++        "adcs  %[t2], %[t3], %[y2]\n\t"
++        "adc   %[t3], %[t4], %[y3]\n\t"
++        : [t0] "=&r"(t0),
++          [t1] "=&r"(t1),
++          [t2] "=&r"(t2),
++          [t3] "=&r"(t3),
++          [t4] "=&r"(t4),
++          [k] "=&r"(k),
++          [s0] "=&r"(s0),
++          [s1] "=&r"(s1),
++          [x1] "=&r"(x1),
++          [y1] "=&r"(y1),
++          [x2] "=&r"(x2),
++          [y2] "=&r"(y2),
++          [x3] "=&r"(x3),
++          [y3] "=&r"(y3)
++        : [a0] "r"(a.data[0]),
++          [a1] "r"(a.data[1]),
++          [a2] "r"(a.data[2]),
++          [a3] "r"(a.data[3]),
++          [p0] "r"(p0),
++          [p1] "r"(p1),
++          [p2] "r"(p2),
++          [p3] "r"(p3),
++          [ri] "r"(r_inv)
++        : "cc");
++
++    return { t0, t1, t2, t3 };
++}
++
++} // namespace bb
++
++#endif // BBERG_ARM64_ASM
+diff --git a/barretenberg/cpp/src/barretenberg/ecc/scalar_multiplication/scalar_multiplication.cpp b/barretenberg/cpp/src/barretenberg/ecc/scalar_multiplication/scalar_multiplication.cpp
+index 792b7e6dc9..be1143d327 100644
+--- a/barretenberg/cpp/src/barretenberg/ecc/scalar_multiplication/scalar_multiplication.cpp
++++ b/barretenberg/cpp/src/barretenberg/ecc/scalar_multiplication/scalar_multiplication.cpp
+@@ -11,6 +11,7 @@
+ #include "./process_buckets.hpp"
+ #include "./scalar_multiplication.hpp"
+ #include "barretenberg/common/thread.hpp"
++#include "barretenberg/ecc/groups/booth_recode.hpp"
+ #include "barretenberg/ecc/curves/bn254/bn254.hpp"
+ #include "barretenberg/ecc/curves/grumpkin/grumpkin.hpp"
+ #include "barretenberg/ecc/scalar_multiplication/scalar_multiplication.hpp"
+@@ -271,6 +272,40 @@ template <typename Curve> uint32_t MSM<Curve>::get_optimal_log_num_buckets(const
+     return best_bits;
+ }
+ 
++template <typename Curve> uint32_t MSM<Curve>::get_optimal_slice_bits_signed(const size_t num_points) noexcept
++{
++    // Signed-Booth digits halve the bucket range: digits lie in [-2^(c-1), 2^(c-1)], so a round
++    // needs 2^(c-1)+1 buckets instead of 2^c, and ceil((NUM_BITS+1)/c) rounds cover the scalar
++    // (the +1 keeps the top digit non-negative). The cheaper bucket term shifts the optimum to
++    // wider windows (fewer rounds) than the unsigned model.
++    auto compute_cost = [&](uint32_t bits) {
++        size_t rounds = numeric::ceil_div(NUM_BITS_IN_FIELD + 1, static_cast<size_t>(bits));
++        size_t buckets = (size_t{ 1 } << (bits - 1)) + 1;
++        return rounds * (num_points + buckets * BUCKET_ACCUMULATION_COST);
++    };
++
++    uint32_t best_bits = 2;
++    size_t best_cost = compute_cost(2);
++    for (uint32_t bits = 3; bits < MAX_SLICE_BITS; ++bits) {
++        size_t cost = compute_cost(bits);
++        if (cost < best_cost) {
++            best_cost = cost;
++            best_bits = bits;
++        }
++    }
++
++    // Tuning override (analogous to BB_MSM_FAST/BB_MSM_LEGACY).
++    static const uint32_t env_override = []() -> uint32_t {
++        const char* env = std::getenv("BB_MSM_SLICE_BITS");
++        if (env == nullptr) {
++            return 0;
++        }
++        const int value = std::atoi(env);
++        return (value >= 2 && value < static_cast<int>(MAX_SLICE_BITS)) ? static_cast<uint32_t>(value) : 0;
++    }();
++    return env_override != 0 ? env_override : best_bits;
++}
++
+ template <typename Curve> bool MSM<Curve>::use_affine_trick(const size_t num_points, const size_t num_buckets) noexcept
+ {
+     if (num_points < AFFINE_TRICK_THRESHOLD) {
+@@ -349,7 +384,7 @@ typename Curve::Element MSM<Curve>::jacobian_pippenger_with_transformed_scalars(
+ }
+ 
+ template <typename Curve>
+-typename Curve::Element MSM<Curve>::affine_pippenger_with_transformed_scalars(MSMData& msm_data) noexcept
++typename Curve::Element MSM<Curve>::affine_pippenger_unsigned_with_transformed_scalars(MSMData& msm_data) noexcept
+ {
+     const size_t num_points = msm_data.scalar_indices.size();
+     const uint32_t bits_per_slice = get_optimal_log_num_buckets(num_points);
+@@ -371,6 +406,7 @@ typename Curve::Element MSM<Curve>::affine_pippenger_with_transformed_scalars(MS
+     for (uint32_t round = 0; round < num_rounds; ++round) {
+         // Build point schedule for this round
+         {
++            BB_BENCH_NAME("MSM::round_build_schedule");
+             for (size_t i = 0; i < num_points; ++i) {
+                 uint32_t idx = msm_data.scalar_indices[i];
+                 uint32_t bucket_idx = get_scalar_slice(msm_data.scalars[idx], round, bits_per_slice);
+@@ -379,17 +415,27 @@ typename Curve::Element MSM<Curve>::affine_pippenger_with_transformed_scalars(MS
+         }
+ 
+         // Sort by bucket and count zero-bucket entries
+-        size_t num_zero_bucket_entries =
+-            sort_point_schedule_and_count_zero_buckets(&msm_data.point_schedule[0], num_points, bits_per_slice);
++        size_t num_zero_bucket_entries = 0;
++        {
++            BB_BENCH_NAME("MSM::round_sort_schedule");
++            num_zero_bucket_entries =
++                sort_point_schedule_and_count_zero_buckets(&msm_data.point_schedule[0], num_points, bits_per_slice);
++        }
+         size_t round_size = num_points - num_zero_bucket_entries;
+ 
+         // Accumulate points into buckets
+         Element bucket_result = Curve::Group::point_at_infinity;
+         if (round_size > 0) {
+             std::span<uint64_t> schedule(&msm_data.point_schedule[num_zero_bucket_entries], round_size);
+-            batch_accumulate_points_into_buckets(schedule, msm_data.points, affine_data, bucket_data);
+-            bucket_result = accumulate_buckets(bucket_data);
+-            bucket_data.bucket_exists.clear();
++            {
++                BB_BENCH_NAME("MSM::round_accumulate");
++                batch_accumulate_points_into_buckets(schedule, msm_data.points, affine_data, bucket_data);
++            }
++            {
++                BB_BENCH_NAME("MSM::round_reduce");
++                bucket_result = accumulate_buckets(bucket_data);
++                bucket_data.bucket_exists.clear();
++            }
+         }
+ 
+         // Combine into running result
+@@ -403,6 +449,97 @@ typename Curve::Element MSM<Curve>::affine_pippenger_with_transformed_scalars(MS
+     return msm_result;
+ }
+ 
++template <typename Curve>
++typename Curve::Element MSM<Curve>::affine_pippenger_with_transformed_scalars(MSMData& msm_data) noexcept
++{
++    static const bool force_unsigned = std::getenv("BB_MSM_UNSIGNED") != nullptr;
++    if (force_unsigned) {
++        return affine_pippenger_unsigned_with_transformed_scalars(msm_data);
++    }
++
++    const size_t num_points = msm_data.scalar_indices.size();
++    const uint32_t bits_per_slice = get_optimal_slice_bits_signed(num_points);
++    // Signed-Booth digits lie in [-2^(c-1), 2^(c-1)]; bucket index = |digit|, bucket 0 unused.
++    const size_t num_buckets = (size_t{ 1 } << (bits_per_slice - 1)) + 1;
++
++    if (!use_affine_trick(num_points, num_buckets)) {
++        return jacobian_pippenger_with_transformed_scalars(msm_data);
++    }
++
++    // LSB-aligned windows: window w covers scalar bits [w*c, (w+1)*c). ceil((NUM_BITS+1)/c)
++    // windows guarantee the top digit is non-negative (the recoding borrows at most one bit).
++    const uint32_t num_windows =
++        static_cast<uint32_t>(numeric::ceil_div(NUM_BITS_IN_FIELD + 1, static_cast<size_t>(bits_per_slice)));
++    constexpr size_t NUM_SCALAR_LIMBS = sizeof(typename Curve::ScalarField) / sizeof(uint64_t);
++
++    // One Booth slice descriptor per window, hoisted out of the per-point loop.
++    std::vector<ecc::booth::BoothSliceParams> window_params(num_windows);
++    for (uint32_t w = 0; w < num_windows; ++w) {
++        window_params[w] =
++            ecc::booth::compute_booth_slice_params(w * bits_per_slice, bits_per_slice, NUM_SCALAR_LIMBS);
++    }
++
++    // Per-call allocation for WASM compatibility (thread_local causes issues in WASM)
++    AffineAdditionData affine_data;
++    BucketAccumulators bucket_data(num_buckets);
++
++    Element msm_result = Curve::Group::point_at_infinity;
++
++    // Process windows MSB-first so the running result needs exactly c doublings between rounds.
++    for (uint32_t round = 0; round < num_windows; ++round) {
++        const auto& slice_params = window_params[num_windows - 1 - round];
++
++        // Build point schedule for this round. Zero digits are stored sign-cleared so the radix
++        // sort's zero-bucket count (which checks the full low word of the first sorted entry)
++        // treats them identically to unsigned zero slices.
++        {
++            BB_BENCH_NAME("MSM::round_build_schedule");
++            for (size_t i = 0; i < num_points; ++i) {
++                uint32_t idx = msm_data.scalar_indices[i];
++                uint32_t packed_digit =
++                    ecc::booth::booth_packed_digit(&msm_data.scalars[idx].data[0], slice_params, bits_per_slice);
++                packed_digit = (packed_digit & PointScheduleEntry::DIGIT_MAGNITUDE_MASK) != 0 ? packed_digit : 0;
++                BB_ASSERT_DEBUG((packed_digit & PointScheduleEntry::DIGIT_MAGNITUDE_MASK) < num_buckets);
++                msm_data.point_schedule[i] = PointScheduleEntry::create(idx, packed_digit).data;
++            }
++        }
++
++        // Sort by digit magnitude (the sign bit sits above the sorted bits) and count zero digits
++        size_t num_zero_bucket_entries = 0;
++        {
++            BB_BENCH_NAME("MSM::round_sort_schedule");
++            num_zero_bucket_entries =
++                sort_point_schedule_and_count_zero_buckets(&msm_data.point_schedule[0], num_points, bits_per_slice);
++        }
++        size_t round_size = num_points - num_zero_bucket_entries;
++
++        // Accumulate points into buckets
++        Element bucket_result = Curve::Group::point_at_infinity;
++        if (round_size > 0) {
++            std::span<uint64_t> schedule(&msm_data.point_schedule[num_zero_bucket_entries], round_size);
++            {
++                BB_BENCH_NAME("MSM::round_accumulate");
++                batch_accumulate_points_into_buckets(schedule, msm_data.points, affine_data, bucket_data);
++            }
++            {
++                BB_BENCH_NAME("MSM::round_reduce");
++                bucket_result = accumulate_buckets(bucket_data);
++                bucket_data.bucket_exists.clear();
++            }
++        }
++
++        // Combine into running result: all windows below the current one are full width c.
++        if (round != 0) {
++            for (uint32_t i = 0; i < bits_per_slice; ++i) {
++                msm_result.self_dbl();
++            }
++        }
++        msm_result += bucket_result;
++    }
++
++    return msm_result;
++}
++
+ template <typename Curve>
+ void MSM<Curve>::batch_accumulate_points_into_buckets(std::span<const uint64_t> point_schedule,
+                                                       std::span<const typename Curve::AffineElement> points,
+@@ -435,10 +572,12 @@ void MSM<Curve>::batch_accumulate_points_into_buckets(std::span<const uint64_t>
+             PointScheduleEntry lhs{ point_schedule[point_it] };
+             PointScheduleEntry rhs{ point_schedule[point_it + 1] };
+ 
+-            process_bucket_pair(lhs.bucket_index(),
+-                                rhs.bucket_index(),
++            process_bucket_pair(lhs.digit_magnitude(),
++                                rhs.digit_magnitude(),
+                                 &points[lhs.point_index()],
+                                 &points[rhs.point_index()],
++                                lhs.digit_sign(),
++                                rhs.digit_sign(),
+                                 affine_data,
+                                 bucket_data,
+                                 scratch_it,
+@@ -448,8 +587,13 @@ void MSM<Curve>::batch_accumulate_points_into_buckets(std::span<const uint64_t>
+         // Handle the last point (odd count case) - separate to avoid bounds check on point_schedule[point_it + 1]
+         if (point_it == last_index) {
+             PointScheduleEntry last{ point_schedule[point_it] };
+-            process_single_point(
+-                last.bucket_index(), &points[last.point_index()], affine_data, bucket_data, scratch_it, point_it);
++            process_single_point(last.digit_magnitude(),
++                                 &points[last.point_index()],
++                                 last.digit_sign(),
++                                 affine_data,
++                                 bucket_data,
++                                 scratch_it,
++                                 point_it);
+         }
+ 
+         // Compute independent additions using Montgomery's batch inversion trick
+@@ -471,10 +615,13 @@ void MSM<Curve>::batch_accumulate_points_into_buckets(std::span<const uint64_t>
+             uint32_t lhs_bucket = affine_data.addition_result_bucket_destinations[output_it];
+             uint32_t rhs_bucket = affine_data.addition_result_bucket_destinations[output_it + 1];
+ 
++            // Recirculated addition outputs carry no sign: it was applied when the inputs entered.
+             process_bucket_pair(lhs_bucket,
+                                 rhs_bucket,
+                                 &affine_output[output_it],
+                                 &affine_output[output_it + 1],
++                                0,
++                                0,
+                                 affine_data,
+                                 bucket_data,
+                                 new_scratch_it,
+@@ -485,7 +632,7 @@ void MSM<Curve>::batch_accumulate_points_into_buckets(std::span<const uint64_t>
+         if (num_outputs > 0 && output_it == num_outputs - 1) {
+             uint32_t bucket = affine_data.addition_result_bucket_destinations[output_it];
+             process_single_point(
+-                bucket, &affine_output[output_it], affine_data, bucket_data, new_scratch_it, output_it);
++                bucket, &affine_output[output_it], 0, affine_data, bucket_data, new_scratch_it, output_it);
+         }
+ 
+         // Continue with recirculated points
+@@ -633,13 +780,31 @@ template class bb::scalar_multiplication::legacy::MSM<bb::curve::BN254>;
+ 
+ // ===================================================================================
+ // Public MSM facade implementation (see scalar_multiplication.hpp). Routes to the
+-// `_fast` rewrite by default, or `legacy::` when BB_MSM_LEGACY is set.
++// `_fast` rewrite by default, or `legacy::` when single-threaded or when
++// BB_MSM_LEGACY is set.
+ // ===================================================================================
+ namespace bb::scalar_multiplication {
+ 
+ bool use_legacy_msm() noexcept
+ {
+-    static const bool legacy_selected = std::getenv("BB_MSM_LEGACY") != nullptr;
++    // The `_fast` rewrite derives its advantage from its round-parallel pass structure: threads
++    // hide the extra schedule/scatter memory traffic of its bucket pipeline. Running
++    // single-threaded there is nothing to hide and the legacy implementation is measurably
++    // faster (Apple M-series, 2^21 UltraHonk benchmark circuit, HARDWARE_CONCURRENCY=1: full
++    // prove ~16-20% slower with the rewrite; isolated 2^21 random MSM 3.11s legacy vs 3.63s
++    // fast). Multithreaded, the rewrite wins (e.g. 2^21 random at 8 threads: 530ms legacy vs
++    // 512ms fast), so it remains the default whenever more than one core is available.
++    // Env overrides (each read once): BB_MSM_FAST=1 forces the rewrite, BB_MSM_LEGACY=1 forces
++    // legacy.
++    static const bool legacy_selected = [] {
++        if (std::getenv("BB_MSM_FAST") != nullptr) {
++            return false;
++        }
++        if (std::getenv("BB_MSM_LEGACY") != nullptr) {
++            return true;
++        }
++        return get_num_cpus() <= 1;
++    }();
+     return legacy_selected;
+ }
+ 
+diff --git a/barretenberg/cpp/src/barretenberg/ecc/scalar_multiplication/scalar_multiplication.hpp b/barretenberg/cpp/src/barretenberg/ecc/scalar_multiplication/scalar_multiplication.hpp
+index 04a6fa7b21..f8b81888f3 100644
+--- a/barretenberg/cpp/src/barretenberg/ecc/scalar_multiplication/scalar_multiplication.hpp
++++ b/barretenberg/cpp/src/barretenberg/ecc/scalar_multiplication/scalar_multiplication.hpp
+@@ -10,7 +10,8 @@
+ //     byte-identical to merge-train (only wrapped in the `legacy` sub-namespace).
+ //   * the round-parallel rewrite in scalar_multiplication_fast.hpp (`*_fast`, `MSM_fast`).
+ // The public facade (`pippenger`, `pippenger_unsafe`, `MSM`) at the bottom dispatches to
+-// the rewrite by default, or to `legacy::` when `use_legacy_msm()` (env BB_MSM_LEGACY).
++// the rewrite by default, or to `legacy::` when `use_legacy_msm()` (single-threaded
++// execution, or env BB_MSM_LEGACY; env BB_MSM_FAST forces the rewrite).
+ // Remove the legacy half + the facade dispatch once the rewrite has soaked.
+ #include "./scalar_multiplication_fast.hpp"
+ #include "barretenberg/ecc/groups/precomputed_generators_bn254_impl.hpp"
+@@ -52,7 +53,7 @@ template <typename Curve> class MSM {
+                   "shifting uint64_t by >= 64 is UB.");
+ 
+     // Number of points to look ahead for memory prefetching
+-    static constexpr size_t PREFETCH_LOOKAHEAD = 32;
++    static constexpr size_t PREFETCH_LOOKAHEAD = 256;
+ 
+     // Prefetch every N iterations (must be power of 2); mask is N-1 for efficient modulo
+     static constexpr size_t PREFETCH_INTERVAL = 16;
+@@ -194,9 +195,17 @@ template <typename Curve> class MSM {
+ 
+     /**
+      * @brief Packed point schedule entry: (point_index << 32) | bucket_index
+-     * @details Used to sort points by their target bucket for cache-efficient processing
++     * @details Used to sort points by their target bucket for cache-efficient processing.
++     *          The affine path stores a signed-Booth digit in the low word: bit 31 is the digit's
++     *          sign (1 = subtract the point), bits 0..30 the magnitude (= bucket index). The radix
++     *          sort orders by at most the low 24 bits (MAX_SLICE_BITS rounded up to a byte), so the
++     *          sign rides along untouched; zero digits are stored with the sign cleared so the
++     *          sort's zero-bucket count and skip logic see them as plain zero entries.
+      */
+     struct PointScheduleEntry {
++        static constexpr uint32_t DIGIT_SIGN_SHIFT = 31;
++        static constexpr uint32_t DIGIT_MAGNITUDE_MASK = (uint32_t{ 1 } << DIGIT_SIGN_SHIFT) - 1;
++
+         uint64_t data;
+ 
+         [[nodiscard]] static constexpr PointScheduleEntry create(uint32_t point_index, uint32_t bucket_index) noexcept
+@@ -205,6 +214,14 @@ template <typename Curve> class MSM {
+         }
+         [[nodiscard]] constexpr uint32_t point_index() const noexcept { return static_cast<uint32_t>(data >> 32); }
+         [[nodiscard]] constexpr uint32_t bucket_index() const noexcept { return static_cast<uint32_t>(data); }
++        [[nodiscard]] constexpr uint32_t digit_magnitude() const noexcept
++        {
++            return static_cast<uint32_t>(data) & DIGIT_MAGNITUDE_MASK;
++        }
++        [[nodiscard]] constexpr uint64_t digit_sign() const noexcept
++        {
++            return (data >> DIGIT_SIGN_SHIFT) & uint64_t{ 1 };
++        }
+     };
+ 
+     // ======================= Public Methods =======================
+@@ -248,6 +265,11 @@ template <typename Curve> class MSM {
+     /** @brief Compute optimal bits per slice by minimizing cost over c in [1, MAX_SLICE_BITS) */
+     static uint32_t get_optimal_log_num_buckets(size_t num_points) noexcept;
+ 
++    /** @brief Window size for the signed-Booth affine path: ceil((NUM_BITS+1)/c) rounds over
++     *         2^(c-1)+1 buckets. Halving the bucket count shifts the optimum to wider windows
++     *         (fewer rounds) than the unsigned model. BB_MSM_SLICE_BITS overrides for tuning. */
++    static uint32_t get_optimal_slice_bits_signed(size_t num_points) noexcept;
++
+     /** @brief Partition per-MSM scalar weights into num_threads work units of approximately
+      *         equal cumulative weight.
+      *  @details Curve-independent and side-effect-free. The walk closes a work unit every time
+@@ -327,14 +349,20 @@ template <typename Curve> class MSM {
+     /** @brief Pippenger using Jacobian buckets (handles edge cases: doubling, infinity) */
+     static Element jacobian_pippenger_with_transformed_scalars(MSMData& msm_data) noexcept;
+ 
+-    /** @brief Pippenger using affine buckets with batch inversion (faster, no edge case handling) */
++    /** @brief Pippenger using affine buckets with batch inversion (faster, no edge case handling).
++     *         Uses signed-Booth digits; BB_MSM_UNSIGNED=1 falls back to the unsigned variant. */
+     static Element affine_pippenger_with_transformed_scalars(MSMData& msm_data) noexcept;
+ 
++    /** @brief Unsigned-window variant of the affine-trick Pippenger (pre-Booth behavior). */
++    static Element affine_pippenger_unsigned_with_transformed_scalars(MSMData& msm_data) noexcept;
++
+     // Helpers for batch_accumulate_points_into_buckets. Inlined for performance.
+ 
+     // Process single point: if bucket has accumulator, pair them for addition; else cache in bucket.
++    // `sign` (signed-Booth digit sign) negates the incoming point in place after the copy.
+     __attribute__((always_inline)) static void process_single_point(size_t bucket,
+                                                                     const AffineElement* point_source,
++                                                                    uint64_t sign,
+                                                                     AffineAdditionData& affine_data,
+                                                                     BucketAccumulators& bucket_data,
+                                                                     size_t& scratch_it,
+@@ -343,12 +371,14 @@ template <typename Curve> class MSM {
+         bool has_accumulator = bucket_data.bucket_exists.get(bucket);
+         if (has_accumulator) {
+             affine_data.points_to_add[scratch_it] = *point_source;
++            affine_data.points_to_add[scratch_it].y.self_conditional_negate(sign);
+             affine_data.points_to_add[scratch_it + 1] = bucket_data.buckets[bucket];
+             bucket_data.bucket_exists.set(bucket, false);
+             affine_data.addition_result_bucket_destinations[scratch_it >> 1] = static_cast<uint32_t>(bucket);
+             scratch_it += 2;
+         } else {
+             bucket_data.buckets[bucket] = *point_source;
++            bucket_data.buckets[bucket].y.self_conditional_negate(sign);
+             bucket_data.bucket_exists.set(bucket, true);
+         }
+         point_it += 1;
+@@ -356,10 +386,16 @@ template <typename Curve> class MSM {
+ 
+     // Branchless bucket pair processing. Updates point_it (by 2 if same bucket, else 1) and scratch_it.
+     // See README.md "batch_accumulate_points_into_buckets Algorithm" for case analysis.
++    // Signed-Booth digit signs are applied in place on the destination after the unconditional copies:
++    // the lhs entry is always consumed this call, so its sign always applies; the rhs INPUT point is
++    // only consumed when buckets_match (otherwise rhs_source is the bucket accumulator, which is
++    // already sign-correct, and the rhs entry is reprocessed as the next call's lhs).
+     __attribute__((always_inline)) static void process_bucket_pair(size_t lhs_bucket,
+                                                                    size_t rhs_bucket,
+                                                                    const AffineElement* lhs_source,
+                                                                    const AffineElement* rhs_source_if_match,
++                                                                   uint64_t lhs_sign,
++                                                                   uint64_t rhs_sign,
+                                                                    AffineAdditionData& affine_data,
+                                                                    BucketAccumulators& bucket_data,
+                                                                    size_t& scratch_it,
+@@ -381,6 +417,8 @@ template <typename Curve> class MSM {
+ 
+         *lhs_destination = *lhs_source;
+         *rhs_destination = *rhs_source;
++        lhs_destination->y.self_conditional_negate(lhs_sign);
++        rhs_destination->y.self_conditional_negate(rhs_sign & static_cast<uint64_t>(buckets_match));
+ 
+         bucket_data.bucket_exists.set(lhs_bucket, (has_bucket_accumulator && buckets_match) || !do_affine_add);
+         scratch_it += do_affine_add ? 2 : 0;
+@@ -406,7 +444,8 @@ extern template class MSM<curve::BN254>;
+ 
+ // ===================================================================================
+ // Public MSM facade — the surface every caller uses. Dispatches to the `_fast` rewrite
+-// by default, or `legacy::` when use_legacy_msm() (env BB_MSM_LEGACY, read once).
++// by default, or `legacy::` when use_legacy_msm() (single-threaded execution, or env
++// BB_MSM_LEGACY; env BB_MSM_FAST forces the rewrite; the policy is resolved once).
+ // Signatures match the rewrite; the legacy branch adapts (legacy has no dedup pre-pass,
+ // and its batch entry takes per-MSM point spans).
+ // ===================================================================================
+diff --git a/barretenberg/cpp/src/barretenberg/flavor/partially_evaluated_multivariates.hpp b/barretenberg/cpp/src/barretenberg/flavor/partially_evaluated_multivariates.hpp
+index 07db6c3ba3..97df83bfe2 100644
+--- a/barretenberg/cpp/src/barretenberg/flavor/partially_evaluated_multivariates.hpp
++++ b/barretenberg/cpp/src/barretenberg/flavor/partially_evaluated_multivariates.hpp
+@@ -29,6 +29,10 @@ class PartiallyEvaluatedMultivariatesBase : public AllEntitiesBase {
+     // static row-skip manifest; 0 means scan every row.
+     size_t row_skip_active_prefix_end = 0;
+ 
++    // Default: all entities empty. Used by callers that allocate and fold entity-by-entity
++    // (see SumcheckProver::partially_evaluate_first_round) instead of allocating up front.
++    PartiallyEvaluatedMultivariatesBase() = default;
++
+     /**
+      * @brief Construct from full polynomials, allocating based on their actual sizes.
+      * @details After the initial sumcheck round, the new size is CEIL(size/2).
+diff --git a/barretenberg/cpp/src/barretenberg/honk/composer/permutation_lib.hpp b/barretenberg/cpp/src/barretenberg/honk/composer/permutation_lib.hpp
+index 8bd6a66fff..b35bcaf227 100644
+--- a/barretenberg/cpp/src/barretenberg/honk/composer/permutation_lib.hpp
++++ b/barretenberg/cpp/src/barretenberg/honk/composer/permutation_lib.hpp
+@@ -18,10 +18,12 @@
+ #include "barretenberg/common/ref_span.hpp"
+ #include "barretenberg/common/thread.hpp"
+ #include "barretenberg/flavor/flavor.hpp"
++#include "barretenberg/polynomials/compressed_index_polynomial.hpp"
+ #include "barretenberg/polynomials/polynomial.hpp"
+ 
+ #include <cstddef>
+ #include <cstdint>
++#include <span>
+ #include <vector>
+ 
+ namespace bb {
+@@ -39,6 +41,24 @@ struct cycle_node {
+ 
+ using CyclicPermutation = std::vector<cycle_node>;
+ 
++/**
++ * @brief Flat (CSR-style) storage for all copy cycles: one contiguous node array plus per-cycle offsets.
++ * @details A vector-of-vectors layout costs one small heap chunk per variable (millions of ~32-byte
++ * allocations at 2^21), which both inflates the live footprint during trace population and leaves the
++ * arena fragmented after release. Two flat arrays hold the same data at 8 bytes/node + 4 bytes/cycle.
++ */
++class CopyCycles {
++  public:
++    std::vector<cycle_node> nodes; // all cycle nodes, grouped by cycle, block-order within each cycle
++    std::vector<uint32_t> offsets; // size() + 1 entries; cycle i occupies [offsets[i], offsets[i+1])
++
++    size_t size() const { return offsets.empty() ? 0 : offsets.size() - 1; }
++    std::span<const cycle_node> operator[](size_t cycle_idx) const
++    {
++        return { nodes.data() + offsets[cycle_idx], offsets[cycle_idx + 1] - offsets[cycle_idx] };
++    }
++};
++
+ /**
+  * @brief Compute Honk-style permutation sigma/id polynomials and add to prover_instance.
+  *
+@@ -69,7 +89,7 @@ using CyclicPermutation = std::vector<cycle_node>;
+ template <typename Flavor>
+ void compute_permutation_argument_polynomials(const typename Flavor::CircuitBuilder& circuit,
+                                               typename Flavor::ProverPolynomials& polynomials,
+-                                              const std::vector<CyclicPermutation>& copy_cycles)
++                                              const CopyCycles& copy_cycles)
+ {
+     using FF = typename Flavor::FF;
+     constexpr size_t NUM_WIRES = Flavor::NUM_WIRES;
+@@ -119,7 +139,7 @@ void compute_permutation_argument_polynomials(const typename Flavor::CircuitBuil
+         parallel_for_heuristic(
+             copy_cycles.size(),
+             [&](size_t cycle_idx) {
+-                const CyclicPermutation& cycle = copy_cycles[cycle_idx];
++                const auto cycle = copy_cycles[cycle_idx];
+                 const auto cycle_size = cycle.size();
+                 if (cycle_size == 0) {
+                     return;
+@@ -173,4 +193,100 @@ void compute_permutation_argument_polynomials(const typename Flavor::CircuitBuil
+     }
+ }
+ 
++/**
++ * @brief Sidecar-first variant of \ref compute_permutation_argument_polynomials: writes the u32 images
++ * (sigmas then ids) instead of the Fr polynomials.
++ *
++ * @details Every sigma/id value is +/-(small index) — see CompressedIndexPolynomial — so the three phases
++ * (identity init, cycle linkages, public-input override) can run entirely on u32 arrays (4 bytes/element
++ * instead of 32). This lets the proving-key construction drop the copy-cycle data *before* the Fr
++ * polynomials are materialized (see ProverInstance), so the two never coexist at the PK-phase peak.
++ * The phases mirror the Fr variant above one-to-one; keep them in sync.
++ */
++template <typename Flavor>
++void compute_permutation_argument_sidecars(const typename Flavor::CircuitBuilder& circuit,
++                                           std::vector<CompressedIndexPolynomial>& sidecars,
++                                           const CopyCycles& copy_cycles,
++                                           const size_t start_index,
++                                           const size_t end_index)
++{
++    constexpr size_t NUM_WIRES = Flavor::NUM_WIRES;
++    constexpr size_t SEPARATOR = PERMUTATION_ARGUMENT_VALUE_SEPARATOR;
++    constexpr uint32_t SIGN_BIT = CompressedIndexPolynomial::SIGN_BIT;
++
++    BB_ASSERT_LT(end_index, static_cast<size_t>(SEPARATOR));
++
++    sidecars.assign(2 * NUM_WIRES, {});
++    for (auto& sidecar : sidecars) {
++        sidecar.start_index = start_index;
++        sidecar.values.resize(end_index - start_index);
++    }
++    // sigmas occupy slots [0, NUM_WIRES), ids slots [NUM_WIRES, 2*NUM_WIRES).
++    auto sigma_at = [&](size_t wire, size_t idx) -> uint32_t& { return sidecars[wire].values[idx - start_index]; };
++    auto id_at = [&](size_t wire, size_t idx) -> uint32_t& {
++        return sidecars[NUM_WIRES + wire].values[idx - start_index];
++    };
++
++    // Phase 1: identity init.
++    {
++        BB_BENCH_NAME("permutation_polys_identity_init");
++        const size_t domain_size = end_index - start_index;
++        const MultithreadData thread_data = calculate_thread_data(domain_size);
++        for (size_t wire_idx = 0; wire_idx < NUM_WIRES; ++wire_idx) {
++            const size_t base = SEPARATOR * wire_idx;
++            parallel_for(thread_data.num_threads, [&](size_t j) {
++                BB_BENCH_TRACY_NAME("Permutation::identity_init");
++                for (size_t i = thread_data.start[j]; i < thread_data.end[j]; ++i) {
++                    const size_t poly_idx = i + start_index;
++                    const auto v = static_cast<uint32_t>(poly_idx + base);
++                    sigma_at(wire_idx, poly_idx) = v;
++                    id_at(wire_idx, poly_idx) = v;
++                }
++            });
++        }
++    }
++
++    // Phase 2: cycle linkages and tag values.
++    {
++        BB_BENCH_NAME("permutation_polys_cycle_linkages");
++        std::span<const uint32_t> real_variable_tags = circuit.real_variable_tags;
++        const auto& tau = circuit.tau();
++
++        parallel_for_heuristic(
++            copy_cycles.size(),
++            [&](size_t cycle_idx) {
++                const auto cycle = copy_cycles[cycle_idx];
++                const auto cycle_size = cycle.size();
++                if (cycle_size == 0) {
++                    return;
++                }
++                for (size_t node_idx = 0; node_idx + 1 < cycle_size; ++node_idx) {
++                    const cycle_node& current = cycle[node_idx];
++                    const cycle_node& next = cycle[node_idx + 1];
++                    sigma_at(current.wire_idx, current.gate_idx) =
++                        static_cast<uint32_t>(next.gate_idx + (SEPARATOR * next.wire_idx));
++                }
++                const uint32_t var_tag = real_variable_tags[cycle_idx];
++                const cycle_node& last_node = cycle[cycle_size - 1];
++                sigma_at(last_node.wire_idx, last_node.gate_idx) =
++                    static_cast<uint32_t>((SEPARATOR * NUM_WIRES) + tau.at(var_tag));
++                const cycle_node& first_node = cycle[0];
++                id_at(first_node.wire_idx, first_node.gate_idx) =
++                    static_cast<uint32_t>((SEPARATOR * NUM_WIRES) + var_tag);
++            },
++            /*heuristic_cost=*/thread_heuristics::FF_COPY_COST * 8);
++    }
++
++    // Phase 3: public input override on sigma_0 (negated small indices: sign bit set).
++    {
++        BB_BENCH_NAME("permutation_polys_public_input_overrides");
++        const auto num_public_inputs = static_cast<uint32_t>(circuit.num_public_inputs());
++        const auto pub_inputs_offset = circuit.blocks.pub_inputs.trace_offset();
++        for (size_t i = 0; i < num_public_inputs; ++i) {
++            const uint32_t idx = static_cast<uint32_t>(i + pub_inputs_offset);
++            sigma_at(0, idx) = (idx + 1) | SIGN_BIT;
++        }
++    }
++}
++
+ } // namespace bb
+diff --git a/barretenberg/cpp/src/barretenberg/honk/execution_trace/execution_trace_block.hpp b/barretenberg/cpp/src/barretenberg/honk/execution_trace/execution_trace_block.hpp
+index d07ed75a7d..ef5bc17db8 100644
+--- a/barretenberg/cpp/src/barretenberg/honk/execution_trace/execution_trace_block.hpp
++++ b/barretenberg/cpp/src/barretenberg/honk/execution_trace/execution_trace_block.hpp
+@@ -310,17 +310,30 @@ template <typename FF, size_t NUM_WIRES_> class ExecutionTraceBlock {
+ #endif
+ 
+     /**
+-     * @brief Release wire and selector memory. Caches block size so size() still works.
+-     * @details Called after trace data has been copied to prover polynomials.
++     * @brief Release the wire-index vectors only, caching the block size so size() still works.
++     * @details Called during proving-key construction once this block's wires have been copied to the wire
++     * polynomials and its copy-cycle nodes have been emitted; the selector data, which is consumed later, is
++     * retained. Idempotent with respect to the cached size (a second call won't cache the freed size).
+      */
+-    void free_data()
++    void free_wires()
+     {
+-        cached_size_ = std::get<0>(wires).size();
+-        data_freed_ = true;
++        if (!data_freed_) {
++            cached_size_ = std::get<0>(wires).size();
++            data_freed_ = true;
++        }
+         for (auto& wire : wires) {
+             wire.clear();
+             wire.shrink_to_fit();
+         }
++    }
++
++    /**
++     * @brief Release wire and selector memory. Caches block size so size() still works.
++     * @details Called after trace data has been copied to prover polynomials.
++     */
++    void free_data()
++    {
++        free_wires();
+         for (auto& sel : non_gate_selectors) {
+             sel.free_memory();
+         }
+diff --git a/barretenberg/cpp/src/barretenberg/polynomials/compressed_index_polynomial.hpp b/barretenberg/cpp/src/barretenberg/polynomials/compressed_index_polynomial.hpp
+new file mode 100644
+index 0000000000..9411d36d72
+--- /dev/null
++++ b/barretenberg/cpp/src/barretenberg/polynomials/compressed_index_polynomial.hpp
+@@ -0,0 +1,69 @@
++#pragma once
++#include "barretenberg/common/assert.hpp"
++#include "barretenberg/numeric/uint256/uint256.hpp"
++
++#include <cstdint>
++#include <vector>
++
++namespace bb {
++
++/**
++ * @brief Compact u32 image of a permutation-argument polynomial (sigma/id).
++ *
++ * @details Every value of those polynomials is FF(k) or -FF(k) for a small index k < 2^31:
++ * rows and wires are separated by PERMUTATION_ARGUMENT_VALUE_SEPARATOR = 2^28 (so identity and
++ * cycle-linkage values are below 4*2^28), tag values sit at 4*2^28 + tau (tau is a small tag id),
++ * and the public-input override on sigma_0 stores small *negated* indices. A sign bit plus 31 bits
++ * of magnitude therefore loses nothing: 4 bytes/element instead of 32. This lets a one-shot prover
++ * drop the Fr originals (~48 MiB each at 2^21) once sumcheck's first round has folded them into
++ * the partial-evaluation table, keeping only the sidecar to re-derive their contribution to the
++ * Gemini batched polynomial.
++ */
++struct CompressedIndexPolynomial {
++    static constexpr uint32_t SIGN_BIT = uint32_t{ 1 } << 31;
++
++    size_t start_index = 0;
++    std::vector<uint32_t> values;
++
++    size_t end_index() const { return start_index + values.size(); }
++
++    /** @brief Reconstruct the field value at absolute index i (must lie in [start_index, end_index)). */
++    template <typename FF> FF decompress(size_t i) const
++    {
++        const uint32_t packed = values[i - start_index];
++        FF v(static_cast<uint64_t>(packed & ~SIGN_BIT));
++        return (packed & SIGN_BIT) != 0 ? -v : v;
++    }
++
++    /**
++     * @brief Build the u32 image of a sigma/id polynomial. Asserts (debug) that every value round-trips,
++     * i.e. is +/-FF(k) with k < 2^31 — guaranteed by the permutation argument's value encoding.
++     */
++    template <typename Polynomial> static CompressedIndexPolynomial compress(const Polynomial& poly)
++    {
++        using FF = std::decay_t<decltype(poly[0])>;
++        static const uint256_t modulus = FF::modulus;
++        static const uint256_t half_modulus = modulus >> 1;
++
++        CompressedIndexPolynomial out;
++        out.start_index = poly.start_index();
++        out.values.resize(poly.end_index() - poly.start_index());
++        for (size_t i = poly.start_index(); i < poly.end_index(); ++i) {
++            const uint256_t canonical(poly[i]);
++            uint32_t packed = 0;
++            if (canonical > half_modulus) {
++                const uint256_t magnitude = modulus - canonical;
++                BB_ASSERT_LT(magnitude, uint256_t(SIGN_BIT));
++                packed = static_cast<uint32_t>(magnitude.data[0]) | SIGN_BIT;
++            } else {
++                BB_ASSERT_LT(canonical, uint256_t(SIGN_BIT));
++                packed = static_cast<uint32_t>(canonical.data[0]);
++            }
++            out.values[i - out.start_index] = packed;
++            BB_ASSERT_DEBUG(out.template decompress<FF>(i) == poly[i]);
++        }
++        return out;
++    }
++};
++
++} // namespace bb
+diff --git a/barretenberg/cpp/src/barretenberg/polynomials/gate_separator.hpp b/barretenberg/cpp/src/barretenberg/polynomials/gate_separator.hpp
+index 93b515919b..1a898a7137 100644
+--- a/barretenberg/cpp/src/barretenberg/polynomials/gate_separator.hpp
++++ b/barretenberg/cpp/src/barretenberg/polynomials/gate_separator.hpp
+@@ -23,11 +23,16 @@ template <typename FF> struct GateSeparatorPolynomial {
+     std::vector<FF> betas;
+ 
+     /**
+-     * @brief The consecutive evaluations \f$ pow_{\ell}(\beta) =  pow_{\beta}(\vec \ell) \f$ for \f$\vec \ell\f$
+-     * identified with the integers \f$\ell = 0,\ldots, 2^d-1\f$
+-     *
++     * @brief Split-table representation of the consecutive evaluations \f$ pow_{\ell}(\beta) \f$ for
++     * \f$\ell = 0,\ldots, 2^d-1\f$ (Dao–Thaler split-eq): \f$ pow_{\ell}(\beta) =
++     * pow_{\ell \bmod 2^{d_{lo}}}(\beta_{<d_{lo}}) \cdot pow_{\lfloor \ell / 2^{d_{lo}} \rfloor}(\beta_{\geq
++     * d_{lo}})\f$, so two tables of \f$2^{d_{lo}}\f$ and \f$2^{d-d_{lo}}\f$ entries replace one of \f$2^d\f$
++     * (64 MiB at \f$d=21\f$ down to ~100 KB) at the cost of one extra multiplication per lookup. The tables
++     * also stay L1/L2-resident, where the monolithic table was streamed from DRAM.
+      */
+-    Polynomial<FF> beta_products;
++    Polynomial<FF> beta_products_lo;
++    Polynomial<FF> beta_products_hi;
++    size_t lo_bits = 0;
+     /**
+      * @brief In Round \f$ i\f$ of Sumcheck, it points to the \f$ i \f$-th element in \f$ \vec \beta \f$
+      *
+@@ -56,8 +61,19 @@ template <typename FF> struct GateSeparatorPolynomial {
+      */
+     GateSeparatorPolynomial(const std::vector<FF>& betas, const size_t log_num_monomials)
+         : betas(betas)
+-        , beta_products(compute_beta_products(betas, log_num_monomials))
+-    {}
++        , lo_bits(log_num_monomials / 2)
++    {
++        if (betas.empty()) {
++            beta_products_lo = compute_beta_products(betas, 0);
++            beta_products_hi = compute_beta_products(betas, 0);
++            return;
++        }
++        const std::vector<FF> betas_lo(betas.begin(), betas.begin() + static_cast<std::ptrdiff_t>(lo_bits));
++        const std::vector<FF> betas_hi(betas.begin() + static_cast<std::ptrdiff_t>(lo_bits),
++                                       betas.begin() + static_cast<std::ptrdiff_t>(log_num_monomials));
++        beta_products_lo = compute_beta_products(betas_lo, lo_bits);
++        beta_products_hi = compute_beta_products(betas_hi, log_num_monomials - lo_bits);
++    }
+ 
+     /**
+      * @brief Construct a new GateSeparatorPolynomial object without expanding to a vector of monomials
+@@ -85,16 +101,20 @@ template <typename FF> struct GateSeparatorPolynomial {
+     }
+ 
+     /**
+-     * @brief Retruns the element in #beta_products at place #idx.
++     * @brief Returns \f$ pow_{\ell}(\beta) \f$ for the monomial index identified by #idx and the current round,
++     * reconstructed as the product of the two split-table entries.
+      *
+      * @param idx
+-     * @return FF const&
++     * @return FF
+      */
+-    FF const& operator[](size_t idx) const
++    FF operator[](size_t idx) const
+     {
+         // At round i, we only iterate over beta_products of indices that are multiples of 2^i,
+-        // Hence for the idx-th element we need to get the (idx * 2^i)-th element in #beta_products.
+-        return beta_products.at((idx >> 1) * periodicity);
++        // Hence for the idx-th element we need the (idx * 2^i)-th product, split across the two tables.
++        const size_t full_idx = (idx >> 1) * periodicity;
++        const size_t lo_idx = full_idx & ((size_t{ 1 } << lo_bits) - 1);
++        const size_t hi_idx = full_idx >> lo_bits;
++        return beta_products_lo.at(lo_idx) * beta_products_hi.at(hi_idx);
+     }
+     /**
+      * @brief Computes the component  at index #current_element_idx in #betas.
+diff --git a/barretenberg/cpp/src/barretenberg/stdlib_circuit_builders/circuit_builder_base.hpp b/barretenberg/cpp/src/barretenberg/stdlib_circuit_builders/circuit_builder_base.hpp
+index 4e7a87e629..dc61653bd7 100644
+--- a/barretenberg/cpp/src/barretenberg/stdlib_circuit_builders/circuit_builder_base.hpp
++++ b/barretenberg/cpp/src/barretenberg/stdlib_circuit_builders/circuit_builder_base.hpp
+@@ -126,6 +126,33 @@ template <typename FF_> class CircuitBuilderBase {
+ 
+     bool circuit_finalized = false;
+ 
++    /**
++     * @brief Release the memory backing the witness values and the copy-constraint index bookkeeping.
++     * @details Intended for proving-key construction from a consumable circuit: callable once the wire values have
++     * been copied into the prover polynomials and the copy cycles have been computed (after which
++     * `variables`/`real_variable_index` are no longer needed). The builder is left in a valid-to-destroy but
++     * unusable-for-circuit-construction state.
++     * @note `real_variable_tags` and `_tau` are NOT released here; they are still required by the permutation
++     * argument. Use release_permutation_data() once the sigma/id polynomials have been computed.
++     */
++    void release_wire_population_data()
++    {
++        std::vector<FF>().swap(variables);
++        std::vector<uint32_t>().swap(next_var_index);
++        std::vector<uint32_t>().swap(prev_var_index);
++        std::vector<uint32_t>().swap(real_variable_index);
++    }
++
++    /**
++     * @brief Release the tag/tau data used by the generalized permutation argument.
++     * @details Callable once the sigma/id polynomials have been computed during proving key construction.
++     */
++    void release_permutation_data()
++    {
++        std::vector<uint32_t>().swap(real_variable_tags);
++        _tau.clear();
++    }
++
+     CircuitBuilderBase(bool is_write_vk_mode = false);
+ 
+     CircuitBuilderBase(const CircuitBuilderBase& other) = default;
+diff --git a/barretenberg/cpp/src/barretenberg/sumcheck/sumcheck.hpp b/barretenberg/cpp/src/barretenberg/sumcheck/sumcheck.hpp
+index 809115abf5..732072968e 100644
+--- a/barretenberg/cpp/src/barretenberg/sumcheck/sumcheck.hpp
++++ b/barretenberg/cpp/src/barretenberg/sumcheck/sumcheck.hpp
+@@ -9,6 +9,7 @@
+ #include "barretenberg/flavor/flavor_concepts.hpp"
+ #include "barretenberg/flavor/multilinear_batching_flavor.hpp"
+ #include "barretenberg/honk/library/grand_product_delta.hpp"
++#include "barretenberg/polynomials/compressed_index_polynomial.hpp"
+ #include "barretenberg/polynomials/eq_polynomial.hpp"
+ #include "barretenberg/polynomials/polynomial.hpp"
+ #include "barretenberg/polynomials/polynomial_arithmetic.hpp"
+@@ -693,17 +694,55 @@ template <typename Flavor> class SumcheckProver {
+         }
+     };
+ 
++    /**
++     * @brief Source polynomials to compress into a u32 sidecar and release right after this prover's
++     * first-round partial evaluation folds them into the book-keeping table. Configured by one-shot
++     * provers for the sigma/id polynomials: their only reads after the first fold are the Gemini
++     * batching pass, which the sidecar can serve at 4 bytes/element instead of 32. Empty by default
++     * (no behavior change for other users).
++     */
++    std::vector<std::pair<typename Flavor::Polynomial*, CompressedIndexPolynomial*>> compress_and_release_on_first_fold;
++
+     /**
+      * @brief Initialize partially evaluated polynomials and perform first round of partial evaluation.
+      * @details Creates PartiallyEvaluatedMultivariates from full polynomials and evaluates at the first round
+-     * challenge.
++     * challenge. Allocation and folding are interleaved per entity so that sources registered in
++     * #compress_and_release_on_first_fold can be released the moment their folded image exists — the
++     * transient coexistence is then one entity's worth instead of the whole table's.
+      * @return PartiallyEvaluatedMultivariates for use in subsequent rounds
+      */
+     PartiallyEvaluatedMultivariates partially_evaluate_first_round(ProverPolynomials& full_polynomials,
+                                                                    const FF& round_challenge)
+     {
+-        PartiallyEvaluatedMultivariates partially_evaluated_polynomials(full_polynomials, multivariate_n);
+-        partially_evaluate(full_polynomials, partially_evaluated_polynomials, round_challenge);
++        PartiallyEvaluatedMultivariates partially_evaluated_polynomials;
++        auto source_view = full_polynomials.get_all();
++        auto dest_view = partially_evaluated_polynomials.get_all();
++        const size_t pe_virtual_size = multivariate_n / 2;
++        parallel_for(source_view.size(), [&](size_t j) {
++            BB_BENCH_TRACY_NAME("Sumcheck::partially_evaluate");
++            auto& poly = source_view[j];
++            const size_t limit = poly.end_index();
++            const size_t desired_size = (limit / 2) + (limit % 2);
++            auto dest = typename Flavor::Polynomial(
++                desired_size, pe_virtual_size, 0, Flavor::Polynomial::DontZeroMemory::FLAG);
++            for (size_t i = 0; i < limit; i += 2) {
++                dest.at(i >> 1) = poly[i] + round_challenge * (poly[i + 1] - poly[i]);
++            }
++            dest.shrink_end_index(desired_size);
++            dest_view[j] = std::move(dest);
++            for (auto& [source_ptr, sidecar] : compress_and_release_on_first_fold) {
++                if (source_ptr == &poly) {
++                    if (sidecar->values.empty()) { // may already hold the image from PK construction
++                        *sidecar = CompressedIndexPolynomial::compress(poly);
++                    }
++                    poly = typename Flavor::Polynomial{};
++                }
++            }
++        });
++        if constexpr (requires { full_polynomials.row_skip_active_prefix_end; }) {
++            partially_evaluated_polynomials.row_skip_active_prefix_end =
++                (full_polynomials.row_skip_active_prefix_end / 2) + (full_polynomials.row_skip_active_prefix_end % 2);
++        }
+         return partially_evaluated_polynomials;
+     }
+ 
+diff --git a/barretenberg/cpp/src/barretenberg/trace_to_polynomials/trace_to_polynomials.cpp b/barretenberg/cpp/src/barretenberg/trace_to_polynomials/trace_to_polynomials.cpp
+index 2c33049674..997454d1ac 100644
+--- a/barretenberg/cpp/src/barretenberg/trace_to_polynomials/trace_to_polynomials.cpp
++++ b/barretenberg/cpp/src/barretenberg/trace_to_polynomials/trace_to_polynomials.cpp
+@@ -19,36 +19,22 @@
+ namespace bb {
+ 
+ template <class Flavor>
+-void TraceToPolynomials<Flavor>::populate(Builder& builder, typename Flavor::ProverPolynomials& polynomials)
++CopyCycles TraceToPolynomials<Flavor>::populate_wires_and_selectors(Builder& builder,
++                                                                    ProverPolynomials& polynomials,
++                                                                    bool consume_builder)
+ {
+ 
+-    BB_BENCH_NAME("trace populate");
+-
+-    auto copy_cycles = populate_wires_and_selectors_and_compute_copy_cycles(builder, polynomials);
++    BB_BENCH_NAME("construct_trace_data");
+ 
+     if constexpr (IsMegaFlavor<Flavor>) {
+-        BB_BENCH_NAME("add_ecc_op_wires_to_prover_instance");
+-
+-        add_ecc_op_wires_to_prover_instance(builder, polynomials);
++        // Mega needs the builder's blocks (ecc op) and variables (databus) beyond this point; don't consume.
++        consume_builder = false;
+     }
+ 
+-    // Compute the permutation argument polynomials (sigma/id) and add them to proving key
+-    {
+-        BB_BENCH_NAME("compute_permutation_argument_polynomials");
+-
+-        compute_permutation_argument_polynomials<Flavor>(builder, polynomials, copy_cycles);
+-    }
+-}
+-
+-template <class Flavor>
+-std::vector<CyclicPermutation> TraceToPolynomials<Flavor>::populate_wires_and_selectors_and_compute_copy_cycles(
+-    Builder& builder, ProverPolynomials& polynomials)
+-{
+-
+-    BB_BENCH_NAME("construct_trace_data");
+-
+-    std::vector<CyclicPermutation> copy_cycles;
+-    copy_cycles.resize(builder.get_num_variables()); // at most one copy cycle per variable
++    // Flat CSR storage: at most one copy cycle per variable. The offsets are built from per-variable
++    // node counts; the nodes array is filled in phase 1.5 with per-cycle write cursors.
++    CopyCycles copy_cycles;
++    const size_t num_cycles = builder.get_num_variables();
+ 
+     RefArray<Polynomial, NUM_WIRES> wires = polynomials.get_wires();
+     auto selectors = polynomials.get_selectors();
+@@ -58,26 +44,26 @@ std::vector<CyclicPermutation> TraceToPolynomials<Flavor>::populate_wires_and_se
+     auto blocks_array = builder.blocks.get();
+     const size_t num_blocks = blocks_array.size();
+ 
+-    // Pre-pass: count copy-cycle sizes per real-variable index so each copy_cycles[i] can be
+-    // reserve()d once before the serial concat in phase 1.5, avoiding repeated reallocations.
++    // Pre-pass: count copy-cycle sizes per real-variable index and turn them into CSR offsets.
+     {
+         BB_BENCH_NAME("counting copy_cycles");
+-        std::vector<uint32_t> cycle_counts(builder.real_variable_index.size(), 0);
++        copy_cycles.offsets.assign(num_cycles + 1, 0);
+         for (auto& block : blocks_array) {
+             const uint32_t block_size = static_cast<uint32_t>(block.size());
+             for (uint32_t block_row_idx = 0; block_row_idx < block_size; ++block_row_idx) {
+                 for (uint32_t wire_idx = 0; wire_idx < NUM_WIRES; ++wire_idx) {
+                     uint32_t var_idx = block.wires[wire_idx][block_row_idx];
+                     // var_idx may be untrusted (e.g. from ACIR) so use .at() to catch OOB. This validates real_var_idx
+-                    // as an in-range index for both cycle_counts and copy_cycles (same size), which is why phase 1.5
+-                    // below can index copy_cycles[real_var_idx] without .at().
+-                    ++cycle_counts.at(builder.real_variable_index.at(var_idx));
++                    // as an in-range index (offsets has num_cycles + 1 entries, real indices are < num_cycles), which
++                    // is why phase 1.5 below can index the cursor array without .at().
++                    ++copy_cycles.offsets.at(builder.real_variable_index.at(var_idx) + 1);
+                 }
+             }
+         }
+-        for (size_t i = 0; i < copy_cycles.size(); ++i) {
+-            copy_cycles[i].reserve(cycle_counts[i]);
++        for (size_t i = 1; i <= num_cycles; ++i) {
++            copy_cycles.offsets[i] += copy_cycles.offsets[i - 1];
+         }
++        copy_cycles.nodes.resize(copy_cycles.offsets[num_cycles]);
+     }
+ 
+     // Phase 1: per-block parallel pass over wires and emit copy-cycle nodes.
+@@ -103,15 +89,23 @@ std::vector<CyclicPermutation> TraceToPolynomials<Flavor>::populate_wires_and_se
+                     local_nodes.emplace_back(real_var_idx, cycle_node{ wire_idx, trace_row_idx });
+                 }
+             }
++
++            if (consume_builder) {
++                // This block's wire data is fully transferred into the wire polynomial and its copy-cycle nodes
++                // are emitted; release the wire-index vectors now (the block size is cached, so the selector pass
++                // below still sees the correct extents).
++                block.free_wires();
++            }
+         });
+     }
+ 
+-    // Phase 1.5: Serial concat in block order to preserve cycle-node ordering within each variable's cycle list.
++    // Phase 1.5: Serial fill in block order to preserve cycle-node ordering within each variable's cycle list.
+     {
+         BB_BENCH_NAME("fill_copy_cycles");
++        std::vector<uint32_t> cursors(copy_cycles.offsets.begin(), copy_cycles.offsets.end() - 1);
+         for (const auto& block_nodes : per_block_nodes) {
+             for (const auto& [real_var_idx, node] : block_nodes) {
+-                copy_cycles[real_var_idx].emplace_back(node);
++                copy_cycles.nodes[cursors[real_var_idx]++] = node;
+             }
+         }
+     }
+@@ -143,13 +137,29 @@ std::vector<CyclicPermutation> TraceToPolynomials<Flavor>::populate_wires_and_se
+         }
+         parallel_for(selector_tasks.size(), [&](size_t task_idx) {
+             const auto& task = selector_tasks[task_idx];
+-            const auto& source = *task.source;
++            auto& source = *task.source;
+             for (uint32_t row_idx = 0; row_idx < task.block_size; ++row_idx) {
+                 selectors[task.target_poly_idx].set_if_valid_index(row_idx + task.trace_offset, source[row_idx]);
+             }
++            if (consume_builder) {
++                // Each task owns a distinct selector, so releasing it from the worker is race-free.
++                source.free_memory();
++            }
+         });
+     }
+ 
++    if constexpr (IsMegaFlavor<Flavor>) {
++        BB_BENCH_NAME("add_ecc_op_wires_to_prover_instance");
++
++        add_ecc_op_wires_to_prover_instance(builder, polynomials);
++    }
++
++    if (consume_builder) {
++        // The wire values now live in the polynomials and the copy cycles have been computed: the witness values
++        // and the copy-constraint index bookkeeping in the builder are no longer needed.
++        builder.release_wire_population_data();
++    }
++
+     return copy_cycles;
+ }
+ 
+diff --git a/barretenberg/cpp/src/barretenberg/trace_to_polynomials/trace_to_polynomials.hpp b/barretenberg/cpp/src/barretenberg/trace_to_polynomials/trace_to_polynomials.hpp
+index bd1172f325..867275ee88 100644
+--- a/barretenberg/cpp/src/barretenberg/trace_to_polynomials/trace_to_polynomials.hpp
++++ b/barretenberg/cpp/src/barretenberg/trace_to_polynomials/trace_to_polynomials.hpp
+@@ -24,21 +24,26 @@ template <class Flavor> class TraceToPolynomials {
+     static constexpr size_t NUM_WIRES = Builder::NUM_WIRES;
+ 
+     /**
+-     * @brief Given a circuit, populate a proving key with wire polys, selector polys, and sigma/id polys
++     * @brief Populate wire polynomials, selector polynomials (and, for Mega, ecc op wires) and compute the copy
++     * cycles from raw circuit data. The wire and selector polynomials must already be allocated; the permutation
++     * argument polynomials (sigma/id) need not exist yet (they are computed by the caller from the returned copy
++     * cycles), which allows their allocation to be deferred until after the builder's gate data has been released.
+      * @note By default, this method constructs an execution trace that is sorted by gate type.
+      *
+      * @param builder
++     * @param consume_builder If true (Ultra flavors only), progressively release the builder's gate data: each
++     * block's wire-index vectors as soon as its wires are transferred into the polynomials, the selectors once
++     * they are copied, and the witness values and copy-constraint bookkeeping once all blocks are done. This
++     * substantially reduces peak memory but leaves the builder unusable for anything except the permutation tag
++     * data (real_variable_tags/tau) and the lookup tables, which remain valid. Ignored for Mega flavors
++     * (databus/ecc-op data is needed downstream).
++     * @return CopyCycles flat copy cycles describing the copy constraints in the circuit
+      */
+-    static void populate(Builder& builder, ProverPolynomials&);
++    static CopyCycles populate_wires_and_selectors(Builder& builder,
++                                                                       ProverPolynomials&,
++                                                                       bool consume_builder = false);
+ 
+   private:
+-    /**
+-     * @brief Populate wire polynomials, selector polynomials and copy cycles from raw circuit data
+-     * @return std::vector<CyclicPermutation> copy cycles describing the copy constraints in the circuit
+-     */
+-    static std::vector<CyclicPermutation> populate_wires_and_selectors_and_compute_copy_cycles(Builder& builder,
+-                                                                                               ProverPolynomials&);
+-
+     /**
+      * @brief Construct and add the goblin ecc op wires to the proving key
+      * @details The ecc op wires vanish everywhere except on the ecc op block, where they contain a copy of the ecc op
+diff --git a/barretenberg/cpp/src/barretenberg/ultra_honk/oink_prover.cpp b/barretenberg/cpp/src/barretenberg/ultra_honk/oink_prover.cpp
+index 0a7703b722..4a023fcca1 100644
+--- a/barretenberg/cpp/src/barretenberg/ultra_honk/oink_prover.cpp
++++ b/barretenberg/cpp/src/barretenberg/ultra_honk/oink_prover.cpp
+@@ -275,6 +275,15 @@ template <typename Flavor> void OinkProver<Flavor>::compute_grand_product_polyno
+     relation_parameters.public_input_delta = compute_public_input_delta<Flavor>(
+         instance.public_inputs, relation_parameters.beta, relation_parameters.gamma, instance.pub_inputs_offset());
+ 
++    // Deferred from PK construction (see allocate_permutation_argument_polynomials): the grand product
++    // is z_perm's first write, and oink runs well below the PK-construction memory high-water mark.
++    const size_t active_range_size = instance.get_final_active_wire_idx() + 1;
++    if (instance.polynomials.z_perm.end_index() < active_range_size) {
++        instance.polynomials.z_perm =
++            Flavor::Polynomial::shiftable(active_range_size, instance.dyadic_size(), Flavor::HasZK);
++        instance.polynomials.set_shifted();
++    }
++
+     // Compute permutation grand product polynomial
+     compute_grand_product<Flavor, UltraPermutationRelation<FF>>(
+         instance.polynomials, relation_parameters, instance.get_final_active_wire_idx() + 1);
+diff --git a/barretenberg/cpp/src/barretenberg/ultra_honk/prover_instance.cpp b/barretenberg/cpp/src/barretenberg/ultra_honk/prover_instance.cpp
+index cc35c4745a..ae6f247e8f 100644
+--- a/barretenberg/cpp/src/barretenberg/ultra_honk/prover_instance.cpp
++++ b/barretenberg/cpp/src/barretenberg/ultra_honk/prover_instance.cpp
+@@ -17,13 +17,22 @@
+ #include "barretenberg/stdlib_circuit_builders/ultra_circuit_builder.hpp"
+ #include "barretenberg/trace_to_polynomials/trace_to_polynomials.hpp"
+ 
++#if defined(__GLIBC__) && !defined(__wasm__)
++#include <malloc.h>
++#endif
++
+ namespace bb {
+ 
+-template <typename Flavor> ProverInstance_<Flavor>::ProverInstance_(Circuit& circuit)
++template <typename Flavor> ProverInstance_<Flavor>::ProverInstance_(Circuit& circuit, bool consume_circuit)
+ {
+     BB_BENCH_NAME("ProverInstance(Circuit&)");
+     vinfo("Constructing ProverInstance");
+ 
++    if constexpr (IsMegaFlavor<Flavor>) {
++        consume_circuit = false; // Mega requires builder data (databus, ecc op) throughout construction
++    }
++    consumed_circuit = consume_circuit;
++
+     // Check pairing point tagging: either no pairing points were created,
+     // or all pairing points have been aggregated into a single equivalence class
+     BB_ASSERT(circuit.pairing_points_tagging.has_single_pairing_point_tag(),
+@@ -41,6 +50,15 @@ template <typename Flavor> ProverInstance_<Flavor>::ProverInstance_(Circuit& cir
+         if (!circuit.circuit_finalized) {
+             circuit.finalize_circuit();
+         }
++        if (consume_circuit) {
++            // The circuit is finalized: the bookkeeping that exists only to support gate creation/finalization can
++            // be released now, ahead of the large polynomial allocations below.
++            circuit.rom_ram_logic = typename Circuit::RomRamLogic{};
++            circuit.range_lists.clear();
++            circuit.constant_variable_indices.clear();
++            decltype(circuit.cached_partial_non_native_field_multiplications)().swap(
++                circuit.cached_partial_non_native_field_multiplications);
++        }
+         // Compute block offsets before dyadic size so that compute_dyadic_size can account for the lookup table offset
+         circuit.blocks.compute_offsets(TRACE_OFFSET);
+         metadata.dyadic_size = compute_dyadic_size(circuit);
+@@ -53,20 +71,137 @@ template <typename Flavor> ProverInstance_<Flavor>::ProverInstance_(Circuit& cir
+         }
+     }
+ 
++    // The polynomials are allocated in stages, interleaved with the population steps that consume the corresponding
++    // circuit data: this way, when the circuit is consumed, the memory of circuit data that has already been
++    // transferred into polynomials can be reused for subsequent allocations instead of growing the peak (the builder
++    // and the full set of polynomials never coexist).
+     {
+         BB_BENCH_NAME("allocating polynomials");
+-        vinfo("allocating polynomials object in prover instance...");
++        vinfo("allocating wire and selector polynomials...");
+ 
+         populate_memory_records(circuit);
++        if (consume_circuit) {
++            // The memory records have been copied (with offsets) into this instance; the circuit's copies are no
++            // longer needed.
++            std::vector<uint32_t>().swap(circuit.memory_read_records);
++            std::vector<uint32_t>().swap(circuit.memory_write_records);
++        }
++
+         allocate_wires();
+-        allocate_permutation_argument_polynomials();
+         allocate_selectors(circuit);
+-        allocate_table_lookup_polynomials(circuit);
+-        allocate_lagrange_polynomials();
+ 
+         if constexpr (IsMegaFlavor<Flavor>) {
+             allocate_ecc_op_polynomials(circuit);
+         }
++    }
++
++    // Populate the wire and selector polynomials and compute the copy cycles; under consume_circuit this
++    // progressively releases the circuit's gate data and witness values.
++    vinfo("populating trace...");
++    {
++        CopyCycles copy_cycles =
++            TraceToPolynomials<Flavor>::populate_wires_and_selectors(circuit, polynomials, consume_circuit);
++
++        if (consume_circuit) {
++            // The wide selectors (allocated over the whole active range because they span several gate
++            // blocks) are typically zero outside the blocks that use them — e.g. a Poseidon2-heavy trace
++            // leaves q_m entirely zero and q_c/q_r/q_o/q_4 mostly zero. Trim each to its
++            // [first_nonzero, last_nonzero] support: reads outside the window hit the polynomial's
++            // virtual zeros, so every consumer sees identical values while the dead backing is freed.
++            {
++                BB_BENCH_NAME("trim_wide_selector_supports");
++                auto trim_to_support = [&](Polynomial& poly) {
++                    const size_t start = poly.start_index();
++                    const size_t end = poly.end_index();
++                    size_t first_nonzero = end;
++                    size_t last_nonzero = start;
++                    for (size_t i = start; i < end; ++i) {
++                        if (!poly[i].is_zero()) {
++                            first_nonzero = std::min(first_nonzero, i);
++                            last_nonzero = i;
++                        }
++                    }
++                    if (first_nonzero == end) { // all zero: keep a minimal stub with full virtual size
++                        poly = Polynomial(1, dyadic_size(), 0);
++                        return;
++                    }
++                    const size_t support = last_nonzero + 1 - first_nonzero;
++                    if (support + 4096 >= end - start) { // not worth a copy for a few pages
++                        return;
++                    }
++                    Polynomial trimmed(support, dyadic_size(), first_nonzero);
++                    for (size_t i = first_nonzero; i <= last_nonzero; ++i) {
++                        trimmed.at(i) = poly[i];
++                    }
++                    poly = std::move(trimmed);
++                };
++                trim_to_support(polynomials.q_m);
++                trim_to_support(polynomials.q_c);
++                trim_to_support(polynomials.q_l);
++                trim_to_support(polynomials.q_r);
++                trim_to_support(polynomials.q_o);
++                trim_to_support(polynomials.q_4);
++            }
++            // Compute the permutation argument on u32 sidecars first (sigma/id values are small signed
++            // indices), so the copy-cycle and tag/tau data can be dropped BEFORE the ~8x larger Fr images
++            // are materialized — the two never coexist, which keeps the PK-construction transient from
++            // setting the process peak.
++            {
++                BB_BENCH_NAME("compute_permutation_argument_polynomials");
++                compute_permutation_argument_sidecars<Flavor>(
++                    circuit, sigma_id_sidecars, copy_cycles, NUM_ZERO_ROWS, trace_active_range_size());
++            }
++            circuit.release_permutation_data();
++            copy_cycles = {};
++
++#if defined(__GLIBC__) && !defined(__wasm__)
++            // The consumed builder/cycle memory was freed in small chunks that glibc retains in the
++            // arena, while the sigma/id materialization below allocates large blocks that go to fresh
++            // mmaps — the retained pages and the new blocks would stack up in peak RSS. Return the
++            // free arena pages to the OS before the climb.
++            malloc_trim(0);
++#endif
++
++            allocate_permutation_argument_polynomials();
++            {
++                BB_BENCH_NAME("materialize_permutation_argument_polynomials");
++                auto sigmas = polynomials.get_sigmas();
++                auto ids = polynomials.get_ids();
++                const size_t domain_size = trace_active_range_size() - NUM_ZERO_ROWS;
++                const MultithreadData thread_data = calculate_thread_data(domain_size);
++                for (size_t wire_idx = 0; wire_idx < sigmas.size(); ++wire_idx) {
++                    auto& sigma = sigmas[wire_idx];
++                    auto& id = ids[wire_idx];
++                    const auto& sigma_sidecar = sigma_id_sidecars[wire_idx];
++                    const auto& id_sidecar = sigma_id_sidecars[sigmas.size() + wire_idx];
++                    parallel_for(thread_data.num_threads, [&](size_t j) {
++                        for (size_t i = thread_data.start[j]; i < thread_data.end[j]; ++i) {
++                            const size_t poly_idx = i + NUM_ZERO_ROWS;
++                            sigma.at(poly_idx) = sigma_sidecar.template decompress<FF>(poly_idx);
++                            id.at(poly_idx) = id_sidecar.template decompress<FF>(poly_idx);
++                        }
++                    });
++                }
++            }
++        } else {
++            // Allocate the permutation argument polynomials only now: under consume_circuit this reuses the
++            // memory released by the circuit's gate data instead of growing the peak.
++            allocate_permutation_argument_polynomials();
++
++            // Compute the permutation argument polynomials (sigma/id) and add them to proving key
++            {
++                BB_BENCH_NAME("compute_permutation_argument_polynomials");
++
++                compute_permutation_argument_polynomials<Flavor>(circuit, polynomials, copy_cycles);
++            }
++        }
++    }
++
++    {
++        BB_BENCH_NAME("allocating table/lagrange polynomials");
++
++        allocate_table_lookup_polynomials(circuit);
++        allocate_lagrange_polynomials();
+         if constexpr (HasDataBus<Flavor>) {
+             allocate_databus_polynomials(circuit);
+         }
+@@ -79,10 +214,6 @@ template <typename Flavor> ProverInstance_<Flavor>::ProverInstance_(Circuit& cir
+         detail::GLOBAL_MEMORY_PROFILE.add_checkpoint("after_alloc");
+     }
+ 
+-    // Construct and add to proving key the wire, selector and copy constraint polynomials
+-    vinfo("populating trace...");
+-    TraceToPolynomials<Flavor>::populate(circuit, polynomials);
+-
+     if constexpr (IsMegaFlavor<Flavor>) {
+         BB_BENCH_NAME("constructing databus polynomials");
+         construct_databus_polynomials(circuit);
+@@ -93,8 +224,13 @@ template <typename Flavor> ProverInstance_<Flavor>::ProverInstance_(Circuit& cir
+     polynomials.lagrange_last.at(final_active_wire_idx) = 1;
+ 
+     construct_lookup_polynomials(circuit);
++    if (consume_circuit) {
++        // The lookup table polynomials and read counts/tags have been constructed; the tables are no longer needed.
++        std::remove_reference_t<decltype(circuit.get_lookup_tables())>().swap(circuit.get_lookup_tables());
++    }
+ 
+-    // Public inputs
++    // Public inputs (the pub_inputs block's size/offset remain valid after gate data release: blocks cache their
++    // size when freed)
+     metadata.num_public_inputs = circuit.blocks.pub_inputs.size();
+     metadata.pub_inputs_offset = circuit.blocks.pub_inputs.trace_offset();
+     for (size_t i = 0; i < metadata.num_public_inputs; ++i) {
+@@ -164,7 +300,16 @@ template <typename Flavor> void ProverInstance_<Flavor>::allocate_permutation_ar
+         id = Polynomial::shiftable(trace_active_range_size(), dyadic_size(), Polynomial::DontZeroMemory::FLAG);
+     }
+ 
+-    polynomials.z_perm = Polynomial::shiftable(trace_active_range_size(), dyadic_size(), Flavor::HasZK);
++    if (consumed_circuit) {
++        // Defer the real z_perm allocation to the grand-product computation in oink (its first
++        // write): the PK-construction climb is the process peak, and oink runs well below it, so
++        // the deferral takes z_perm's 1.4KB/gate out of the high-water mark. A minimal unmasked
++        // shiftable stub keeps set_shifted() and any virtual-zero reads valid in the meantime;
++        // the real allocation in oink applies the ZK masking rows.
++        polynomials.z_perm = Polynomial::shiftable(NUM_ZERO_ROWS + 1, dyadic_size(), /*masked=*/false);
++    } else {
++        polynomials.z_perm = Polynomial::shiftable(trace_active_range_size(), dyadic_size(), Flavor::HasZK);
++    }
+ }
+ 
+ template <typename Flavor> void ProverInstance_<Flavor>::allocate_lagrange_polynomials()
+diff --git a/barretenberg/cpp/src/barretenberg/ultra_honk/prover_instance.hpp b/barretenberg/cpp/src/barretenberg/ultra_honk/prover_instance.hpp
+index 722a52eb4a..ceff61f195 100644
+--- a/barretenberg/cpp/src/barretenberg/ultra_honk/prover_instance.hpp
++++ b/barretenberg/cpp/src/barretenberg/ultra_honk/prover_instance.hpp
+@@ -13,6 +13,7 @@
+ #include "barretenberg/flavor/ultra_keccak_flavor.hpp"
+ #include "barretenberg/flavor/ultra_keccak_zk_flavor.hpp"
+ #include "barretenberg/flavor/ultra_zk_flavor.hpp"
++#include "barretenberg/polynomials/compressed_index_polynomial.hpp"
+ #include "barretenberg/polynomials/polynomial_stats.hpp"
+ #include "barretenberg/relations/relation_parameters.hpp"
+ 
+@@ -53,6 +54,16 @@ template <typename Flavor_> class ProverInstance_ {
+     std::vector<uint32_t> memory_read_records;
+     std::vector<uint32_t> memory_write_records;
+ 
++    // u32 images of the sigma/id polynomials (sigmas then ids), populated under consume_circuit.
++    // The permutation argument is computed on these first so the copy-cycle data can be dropped
++    // before the Fr polynomials are materialized; a one-shot prover may later release the Fr
++    // originals and serve the Gemini batching pass from these (see UltraProver_::consume_polynomials).
++    std::vector<CompressedIndexPolynomial> sigma_id_sidecars;
++
++    // Whether this instance consumed its circuit during construction (one-shot prove path). Gates the
++    // memory-peak optimizations: deferred z_perm allocation (done lazily at the grand product) etc.
++    bool consumed_circuit = false;
++
+     size_t dyadic_size() const { return metadata.dyadic_size; }
+     size_t log_dyadic_size() const { return numeric::get_msb(dyadic_size()); }
+     size_t pub_inputs_offset() const { return metadata.pub_inputs_offset; }
+@@ -73,7 +84,15 @@ template <typename Flavor_> class ProverInstance_ {
+         return typename Flavor::PrecomputedData{ polynomials.get_precomputed(), metadata };
+     }
+ 
+-    ProverInstance_(Circuit& circuit);
++    /**
++     * @param consume_circuit If true (Ultra flavors only), the circuit's memory (gate data, witness values, copy
++     * constraint and lookup bookkeeping) is progressively released as soon as it has been transferred into the
++     * prover polynomials, and the large polynomials are allocated in stages interleaved with that release, so the
++     * builder and the full set of polynomials never coexist. This substantially reduces peak memory. The circuit is
++     * left in a valid-to-destroy but otherwise unusable state. Ignored for Mega flavors (databus/ecc-op data is
++     * needed downstream).
++     */
++    ProverInstance_(Circuit& circuit, bool consume_circuit = false);
+ 
+     ProverInstance_() = default;
+     ProverInstance_(const ProverInstance_&) = delete;
+diff --git a/barretenberg/cpp/src/barretenberg/ultra_honk/ultra_prover.cpp b/barretenberg/cpp/src/barretenberg/ultra_honk/ultra_prover.cpp
+index 3a8dd81644..8cc82db5f1 100644
+--- a/barretenberg/cpp/src/barretenberg/ultra_honk/ultra_prover.cpp
++++ b/barretenberg/cpp/src/barretenberg/ultra_honk/ultra_prover.cpp
+@@ -113,6 +113,26 @@ template <typename Flavor> void UltraProver_<Flavor>::execute_sumcheck_iop()
+                       prover_instance->relation_parameters,
+                       virtual_log_n);
+ 
++    if (consume_polynomials) {
++        // After the first-round fold, the sigma/id originals' only remaining read is the Gemini
++        // batching pass; have sumcheck release the Fr backing (~48 MiB each at 2^21) the moment
++        // their folded image exists. The u32 sidecars usually already exist from PK construction
++        // (consume_circuit); otherwise sumcheck extracts them before releasing.
++        auto& sidecars = prover_instance->sigma_id_sidecars;
++        auto sigmas = prover_instance->polynomials.get_sigmas();
++        auto ids = prover_instance->polynomials.get_ids();
++        if (sidecars.size() != sigmas.size() + ids.size()) {
++            sidecars.assign(sigmas.size() + ids.size(), {});
++        }
++        size_t sidecar_idx = 0;
++        for (size_t i = 0; i < sigmas.size(); ++i) {
++            sumcheck.compress_and_release_on_first_fold.emplace_back(&sigmas[i], &sidecars[sidecar_idx++]);
++        }
++        for (size_t i = 0; i < ids.size(); ++i) {
++            sumcheck.compress_and_release_on_first_fold.emplace_back(&ids[i], &sidecars[sidecar_idx++]);
++        }
++    }
++
+     if constexpr (Flavor::HasZK) {
+         // Generate libra univariates for ALL rounds (real + virtual) so that the ZK and non-ZK
+         // virtual round paths are unified. The libra contributes to every round uniformly.
+@@ -135,9 +155,45 @@ template <typename Flavor> void UltraProver_<Flavor>::execute_pcs()
+ 
+     auto& ck = commitment_key;
+ 
+-    PolynomialBatcher polynomial_batcher(prover_instance->dyadic_size(), prover_instance->polynomials.max_end_index());
++    // The sigma/id entities may have been released after sumcheck's first-round fold (their data now
++    // lives in u32 sidecars), in which case max_end_index() no longer covers them — extend the actual
++    // data size so the batched accumulator spans the sidecar region too.
++    const auto& sidecars = prover_instance->sigma_id_sidecars;
++    size_t actual_data_size = prover_instance->polynomials.max_end_index();
++    for (const auto& sidecar : sidecars) {
++        actual_data_size = std::max(actual_data_size, sidecar.end_index());
++    }
++    PolynomialBatcher polynomial_batcher(prover_instance->dyadic_size(), actual_data_size);
+     polynomial_batcher.set_unshifted(prover_instance->polynomials.get_unshifted());
+     polynomial_batcher.set_to_be_shifted_by_one(prover_instance->polynomials.get_to_be_shifted());
++    if (consume_polynomials) {
++        // Sumcheck is done: the shifted entities are views aliasing the to-be-shifted polynomials' backing
++        // memory and have no further reads — drop them now so the batcher's source release actually frees.
++        for (auto& poly : prover_instance->polynomials.get_shifted()) {
++            poly = Polynomial<FF>{};
++        }
++        polynomial_batcher.set_consume_sources(true);
++    }
++    if (!sidecars.empty()) {
++        // Re-register the released sigma/id sources by their slot in the unshifted ordering, so their
++        // batching contribution lands with exactly the rho power their Fr originals would have used.
++        auto unshifted = prover_instance->polynomials.get_unshifted();
++        auto sigmas = prover_instance->polynomials.get_sigmas();
++        auto ids = prover_instance->polynomials.get_ids();
++        for (size_t slot = 0; slot < unshifted.size(); ++slot) {
++            const Polynomial<FF>* address = &unshifted[slot];
++            for (size_t i = 0; i < sigmas.size(); ++i) {
++                if (address == &sigmas[i]) {
++                    polynomial_batcher.add_compressed_unshifted(slot, &sidecars[i]);
++                }
++            }
++            for (size_t i = 0; i < ids.size(); ++i) {
++                if (address == &ids[i]) {
++                    polynomial_batcher.add_compressed_unshifted(slot, &sidecars[sigmas.size() + i]);
++                }
++            }
++        }
++    }
+ 
+     OpeningClaim prover_opening_claim;
+     if constexpr (!Flavor::HasZK) {
+diff --git a/barretenberg/cpp/src/barretenberg/ultra_honk/ultra_prover.hpp b/barretenberg/cpp/src/barretenberg/ultra_honk/ultra_prover.hpp
+index b3c09a877f..772b77ac10 100644
+--- a/barretenberg/cpp/src/barretenberg/ultra_honk/ultra_prover.hpp
++++ b/barretenberg/cpp/src/barretenberg/ultra_honk/ultra_prover.hpp
+@@ -8,6 +8,7 @@
+ #include "barretenberg/commitment_schemes/small_subgroup_ipa/small_subgroup_ipa.hpp"
+ #include "barretenberg/flavor/mega_flavor.hpp"
+ #include "barretenberg/flavor/ultra_flavor.hpp"
++#include "barretenberg/polynomials/compressed_index_polynomial.hpp"
+ #include "barretenberg/honk/proof_system/types/proof.hpp"
+ #include "barretenberg/sumcheck/sumcheck_output.hpp"
+ #include "barretenberg/transcript/transcript.hpp"
+@@ -40,6 +41,11 @@ template <typename Flavor_> class UltraProver_ {
+     size_t log_dyadic_size() const { return prover_instance->log_dyadic_size(); }
+     const std::shared_ptr<Transcript>& get_transcript() const { return transcript; }
+ 
++    // If set (one-shot prove paths), the prover polynomials are released during the PCS phase once the
++    // Gemini batching pass — their last read — is done, so they don't sit under the PCS-phase memory peak.
++    // Callers that use the instance's polynomials after construct_proof() must leave this off.
++    bool consume_polynomials = false;
++
+   private:
+     std::shared_ptr<ProverInstance> prover_instance;
+     std::shared_ptr<Transcript> transcript;
