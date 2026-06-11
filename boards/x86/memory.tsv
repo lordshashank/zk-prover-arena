@@ -1,3 +1,5 @@
 iso	stack	task	peak_rss_MiB	baseline_peak_MiB	time_ratio	median_prove_s	verified	valid	note	machine
 2026-06-10T16:12:11.003Z	baseline	hard2pow21-v2	2027	2027	1.0000	67.19	1	1		gh-x64/EPYC-7763
 2026-06-10T16:29:01.160Z	opt-next	hard2pow21-v2	1871	2027	0.875	58.79	1	1		gh-x64/EPYC-7763
+2026-06-11T08:18:20.350Z	baseline	hard2pow21-v2	2027	2027	1.0000	66.69	1	1		gh-x64/EPYC-7763
+2026-06-11T08:34:52.552Z	opt-next2	hard2pow21-v2	1802	2027	0.8607	57.4	1	1		gh-x64/EPYC-7763

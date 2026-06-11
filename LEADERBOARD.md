@@ -13,15 +13,17 @@ Each board is ranked by its own metric (**bold**), but shows the other metric to
 
 | # | prover | prove time | vs baseline | peak RSS | vs baseline | machine | date |
 |---|--------|------|------|------|------|------|------|
-| 1 | opt-next | **56.57 s** | -11.2% | 1889 MiB | -4.3% | `gh-arm64/Cobalt-100` | 2026-06-10 |
-| 2 | baseline | **63.74 s** | baseline | 1973 MiB | baseline | `gh-arm64/Cobalt-100` | 2026-06-10 |
+| 1 | opt-next2 | **45.60 s** | -28.5% | 1844 MiB | -6.5% | `gh-arm64/Cobalt-100` | 2026-06-11 |
+| 2 | opt-next | **56.57 s** | -11.2% | 1889 MiB | -4.3% | `gh-arm64/Cobalt-100` | 2026-06-10 |
+| 3 | baseline | **63.74 s** | baseline | 1973 MiB | baseline | `gh-arm64/Cobalt-100` | 2026-06-10 |
 
 ## Memory board (ranked by peak RSS)
 
 | # | prover | peak RSS | vs baseline | prove time | vs baseline | machine | date |
 |---|--------|------|------|------|------|------|------|
-| 1 | opt-next | **1889 MiB** | -4.3% | 56.57 s | -11.2% | `gh-arm64/Cobalt-100` | 2026-06-10 |
-| 2 | baseline | **1973 MiB** | baseline | 63.74 s | baseline | `gh-arm64/Cobalt-100` | 2026-06-10 |
+| 1 | opt-next2 | **1844 MiB** | -6.5% | 45.60 s | -28.5% | `gh-arm64/Cobalt-100` | 2026-06-11 |
+| 2 | opt-next | **1889 MiB** | -4.3% | 56.57 s | -11.2% | `gh-arm64/Cobalt-100` | 2026-06-10 |
+| 3 | baseline | **1973 MiB** | baseline | 63.74 s | baseline | `gh-arm64/Cobalt-100` | 2026-06-10 |
 
 # x86-64 boards (`ubuntu-latest` — Aztec's perf ISA; upstream x64 asm active)
 
@@ -31,14 +33,16 @@ GitHub's x86 fleet mixes CPU models (AMD EPYC / Intel Xeon — see the machine c
 
 | # | prover | vs same-VM baseline | prove time | baseline (same VM) | peak RSS | machine | date |
 |---|--------|------|------|------|------|------|------|
-| 1 | opt-next | **-12.5%** | 58.79 s | 67.19 s | 1871 MiB | `gh-x64/EPYC-7763` | 2026-06-10 |
-| 2 | baseline | **baseline** | 67.19 s | 67.19 s | 2027 MiB | `gh-x64/EPYC-7763` | 2026-06-10 |
+| 1 | opt-next2 | **-13.9%** | 57.40 s | 66.69 s | 1802 MiB | `gh-x64/EPYC-7763` | 2026-06-11 |
+| 2 | opt-next | **-12.5%** | 58.79 s | 67.19 s | 1871 MiB | `gh-x64/EPYC-7763` | 2026-06-10 |
+| 3 | baseline | **baseline** | 67.19 s | 67.19 s | 2027 MiB | `gh-x64/EPYC-7763` | 2026-06-10 |
 
 ## Memory board (ranked by peak RSS)
 
 | # | prover | peak RSS | baseline (same VM) | prove time vs baseline | machine | date |
 |---|--------|------|------|------|------|------|
-| 1 | opt-next | **1871 MiB** | 2027 MiB | -12.5% | `gh-x64/EPYC-7763` | 2026-06-10 |
-| 2 | baseline | **2027 MiB** | 2027 MiB | baseline | `gh-x64/EPYC-7763` | 2026-06-10 |
+| 1 | opt-next2 | **1802 MiB** | 2027 MiB | -13.9% | `gh-x64/EPYC-7763` | 2026-06-11 |
+| 2 | opt-next | **1871 MiB** | 2027 MiB | -12.5% | `gh-x64/EPYC-7763` | 2026-06-10 |
+| 3 | baseline | **2027 MiB** | 2027 MiB | baseline | `gh-x64/EPYC-7763` | 2026-06-10 |
 
 _Boards are produced only by the `official-grade` CI workflow on GitHub-hosted runners; every row records its machine. Numbers from different boards/machines are not directly comparable. Local numbers are advisory. To get on a board: see "Submitting" in the README._
