@@ -1,5 +1,19 @@
 # zk-prover-arena
 
+> **⚠️ The arena has moved → [lordshashank/aztec-packages (`zk-arena` branch)](https://github.com/lordshashank/aztec-packages).**
+>
+> Submissions are now plain PRs against the rolling-champion branch: your PR's merge result is
+> graded paired against the branch tip on both canonical architectures, the advisory Pareto
+> verdict lands on the PR, and **merged PRs become the new base everyone must beat**. See the new
+> [README](https://github.com/lordshashank/aztec-packages/blob/zk-arena/zk-arena/README.md) and
+> [LEADERBOARD](https://github.com/lordshashank/aztec-packages/blob/zk-arena/zk-arena/LEADERBOARD.md).
+>
+> This repo is **archived as the grading spec and history** of the patch-based flow (tag
+> `patch-flow-final`): the rationale for every gate, the boards through `opt-next3`, the full
+> grader transcripts, and [RESEARCH.md](./RESEARCH.md). The new flow inherits its task, budgets,
+> margins, and the frozen-verifier soundness anchor unchanged.
+
+
 An open optimization arena for **ZK prover algorithm research**.
 
 > **The challenge:** make the [barretenberg](https://github.com/AztecProtocol/aztec-packages/tree/master/barretenberg) UltraHonk prover cheaper — in time and in memory — on one frozen, hard proving task. The circuit, the witness, the proof system, and the config never change. **The only thing you may change is the prover itself.**
